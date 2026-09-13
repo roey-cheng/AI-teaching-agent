@@ -310,6 +310,7 @@ Stuck students
 ```
 
 它不重新评分，也不改成绩。
+学生端 Agent 不允许调用 Teaching Analytics Agent。即使学生在聊天中请求班级统计、其他学生提交情况、常见错误分布或教学分析，Runtime 也必须在工具路由层拒绝，并返回面向学生的普通解释或学习建议。
 
 ### 6.5 Subagent 路由
 
@@ -317,16 +318,19 @@ Stuck students
 flowchart TD
     Request[学生或教师请求] --> Runtime[Deep Agents / LangGraph Runtime]
     Runtime --> Context[加载 AgentContext]
-    Context --> Orchestrator[Teaching Orchestrator]
+    Context --> RoleGate{角色权限检查}
+    RoleGate --> Orchestrator[Teaching Orchestrator]
 
     Orchestrator -->|已有上下文足够| Direct[直接解释或 Hint]
     Orchestrator -->|代码分析或运行验证| Debug[Private Debug Agent]
     Orchestrator -->|需要课程资料| Retrieval[Retrieval Agent]
-    Orchestrator -->|教师聚合问题| Analytics[Teaching Analytics Agent]
+    Orchestrator -->|教师角色 + 聚合问题| Analytics[Teaching Analytics Agent]
+    Orchestrator -->|学生请求教学分析| DenyAnalytics[拒绝 Analytics 工具调用]
 
     Debug -->|结构化诊断| Orchestrator
     Retrieval -->|相关资料片段| Orchestrator
     Analytics -->|分析结果| Orchestrator
+    DenyAnalytics --> Direct
     Direct --> Response[最终回答]
     Orchestrator --> Runtime
     Runtime --> Response
@@ -665,6 +669,7 @@ GET  /teacher/labs/{lab_id}/insights
 ```
 
 Agent API 接收学生或教师请求后，先构造请求级 AgentContext，再交给 Deep Agents / LangGraph Runtime。Runtime 内部可以调度 Orchestrator、Subagents 和 allowlisted tools，但所有工具仍由后端做权限检查。
+`GET /teacher/labs/{lab_id}/insights` 只允许教师角色调用。学生端 Assistant API 不暴露 Teaching Analytics Agent，也不能通过 prompt 或工具路由间接触发它。
 
 ### 13.3 Student-facing Read Tools
 
@@ -726,6 +731,7 @@ flowchart LR
 - Orchestrator 不读取完整 hidden tests；只有 Private Debug Agent 可读取。
 - 不把完整 tests、候选答案或完整诊断日志放进学生聊天上下文。
 - Deep Agents / LangGraph Runtime 只能通过 allowlisted tools 访问系统能力，不能直接访问或修改正式评分表。
+- 学生端 Agent 只能调用学生可见工具、Retrieval Agent 和 Private Debug Agent 的受限诊断能力，不能调用 Teaching Analytics Agent。
 - Agent Service Account 对 Website Core 的正式评分表只有读取权限。
 - Diagnostic Sandbox 不拥有写分数或更新 Progress 的凭证。
 - Sandbox 默认禁用网络，并限制 CPU、内存、进程、文件系统和执行时间。
