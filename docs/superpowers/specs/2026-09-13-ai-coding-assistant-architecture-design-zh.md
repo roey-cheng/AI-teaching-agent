@@ -43,10 +43,11 @@ flowchart TD
     Teacher[教师]
 
     Student --> Website[校内 Coding Lab 网站]
-    Teacher --> Dashboard[教师 Dashboard]
+    Teacher --> Website
 
     Website --> Core[Website Core API]
     Website --> Assistant[题目级 AI Assistant]
+    Website --> Dashboard[教师专用 Dashboard]
     Dashboard --> AgentAPI[Agent API]
     Assistant --> AgentAPI
 
@@ -73,6 +74,7 @@ flowchart TD
 ```
 
 开发初期可以使用同一个 FastAPI 项目和同一个 MySQL 数据库，但必须在代码模块和数据库权限上分离 Website Core 与 Agent Module。
+教师端不是一个独立产品。教师和学生进入同一个校内 Coding Lab 网站；教师在相同的 Course / Lab / Question / Run 页面基础上，因为角色权限不同，会额外看到教师专用入口和 Dashboard。
 
 ---
 
@@ -500,14 +502,16 @@ source location
 
 ## 11. 教师 Dashboard 与教学分析
 
-教师先看聚合数据，再在异常情况下查看个别学生。
+教师 Dashboard 是同一个 Coding Lab 网站里的教师权限视图，不是独立系统。教师可以像学生一样进入课程、Lab、题目和 Run 页面查看作业体验，同时额外看到班级级别的 Dashboard。
+
+教师默认先看聚合数据，再在异常情况下查看个别学生。
 
 ```mermaid
 flowchart LR
     Core[(Website Core Tables)] --> Aggregate[Read / Aggregate Tools]
     Agent[(Agent Tables)] --> Aggregate
     Aggregate --> Analytics[Teaching Analytics Agent]
-    Analytics --> Dashboard[教师 Dashboard]
+    Analytics --> Dashboard[网站内教师 Dashboard]
     Dashboard --> Drilldown[必要时查看学生详情]
 ```
 
@@ -791,6 +795,8 @@ Agent 替学生提交代码
 校内 Coding Lab 网站
 ├── Website Core
 │   ├── Course / Lab / Question
+│   ├── 学生视图
+│   ├── 教师视图 / Dashboard
 │   ├── Draft
 │   ├── 正式 Run
 │   ├── Grading Sandbox
