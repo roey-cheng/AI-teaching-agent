@@ -20,7 +20,7 @@ CodeRunner 是产品参考：本项目模仿其 Coding Lab、运行代码、自�
 
 ## 2. 最重要的边界
 
-系统逻辑上分为两部分。
+系统逻辑上分为两部分，但物理部署上优先做成同一个后端应用里的两个模块。
 
 | 模块 | 主要职责 |
 |---|---|
@@ -32,6 +32,8 @@ CodeRunner 是产品参考：本项目模仿其 Coding Lab、运行代码、自�
 > Website Core 是正式 Run、`PASSED`、题目分数和 Lab Progress 的唯一事实来源。Agent Module 只能读取这些事实，不能修改它们。
 
 这意味着 Agent 即使在私有环境中验证出一个正确修复方案，也不能替学生提交代码、标记题目通过或增加分数。
+
+开发初期采用 modular monolith。也就是一个 React 前端、一个 FastAPI 后端、一个 MySQL 数据库；Website Core 和 Agent Module 在同一个后端进程里，通过 router、service layer、repository 和 internal tool interface 解耦。它们不拆成两个互相通过 HTTP 调用的后端服务。
 
 ---
 
@@ -45,18 +47,21 @@ flowchart TD
     Student --> Website[校内 Coding Lab 网站]
     Teacher --> Website
 
-    Website --> Core[Website Core API]
+    Website --> Backend[统一 FastAPI 后端]
     Website --> Assistant[题目级 AI Assistant]
     Website --> Dashboard[教师专用 Dashboard]
-    Dashboard --> AgentAPI[Agent API]
-    Assistant --> AgentAPI
+
+    Backend --> Core[Website Core 模块]
+    Backend --> AgentRouter[Agent Router / API 模块]
+    Dashboard --> AgentRouter
+    Assistant --> AgentRouter
 
     Core -->|正式 Run| GradingSandbox[Grading Sandbox]
     Core --> CoreTables[(MySQL Core Tables)]
     GradingSandbox --> CoreTables
 
-    AgentAPI --> Runtime[Deep Agents / LangGraph Runtime]
-    AgentAPI --> ReadTools[Website Core Read Tools]
+    AgentRouter --> Runtime[Deep Agents / LangGraph Runtime]
+    AgentRouter --> ReadTools[Website Core Internal Read Tools]
     ReadTools --> CoreTables
 
     Runtime --> Orchestrator[Teaching Orchestrator]
@@ -74,7 +79,7 @@ flowchart TD
     Runtime --> AgentTables
 ```
 
-开发初期可以使用同一个 FastAPI 项目和同一个 MySQL 数据库，但必须在代码模块和数据库权限上分离 Website Core 与 Agent Module。
+开发初期使用同一个 FastAPI 项目和同一个 MySQL 数据库。Website Core 与 Agent Module 是同一个后端里的逻辑模块，不是两个通过 HTTP 互相调用的服务。模块边界通过代码目录、service layer、repository、internal tools 和数据库访问权限来维持。
 教师端不是一个独立产品。教师和学生进入同一个校内 Coding Lab 网站；教师在相同的 Course / Lab / Question / Run 页面基础上，因为角色权限不同，会额外看到教师专用入口和 Dashboard。
 
 ---
@@ -107,7 +112,7 @@ Lab Progress
 sequenceDiagram
     actor Student as 学生
     participant UI as Question Workspace
-    participant Core as Website Core API
+    participant Core as Website Core 模块
     participant DB as Core Tables
     participant Sandbox as Grading Sandbox
 
@@ -694,6 +699,8 @@ erDiagram
 
 ## 13. API 与 Internal Tools
 
+前端通过 HTTP 调用统一 FastAPI 后端。后端内部的 Website Core 模块和 Agent Module 不通过 HTTP 互相调用；Agent 读取 Website Core 数据时，调用的是同进程内的 service / repository / internal tool interface。
+
 ### 13.1 Website Core API
 
 ```text
@@ -716,10 +723,10 @@ GET  /questions/{lab_question_id}/assistant/stream
 GET  /teacher/labs/{lab_id}/insights
 ```
 
-Agent API 接收学生或教师请求后，先构造请求级 AgentContext，再交给 Deep Agents / LangGraph Runtime。Runtime 内部可以调度 Orchestrator、Subagents 和 allowlisted tools，但所有工具仍由后端做权限检查。
+Agent API 接收学生或教师请求后，先构造请求级 AgentContext，再交给 Deep Agents / LangGraph Runtime。Runtime 内部可以调度 Orchestrator、Subagents 和 allowlisted tools，但所有工具仍由同一个后端做权限检查。
 `GET /teacher/labs/{lab_id}/insights` 只允许教师角色调用。学生端 Assistant API 不暴露 Teaching Analytics Agent，也不能通过 prompt 或工具路由间接触发它。
 
-### 13.3 Student-facing Read Tools
+### 13.3 Student-facing Internal Read Tools
 
 ```text
 get_question_context()
@@ -729,6 +736,8 @@ inspect_execution(run_id)
 get_student_progress()
 search_course_material(query)
 ```
+
+这些 Read Tools 是后端内部的受控只读接口，不是 Website Core 和 Agent Module 之间的 HTTP API。它们可以包装已有的 service / repository 方法，并在返回给 Agent 前完成权限检查和数据过滤。
 
 ### 13.4 Private Debug Tools
 
