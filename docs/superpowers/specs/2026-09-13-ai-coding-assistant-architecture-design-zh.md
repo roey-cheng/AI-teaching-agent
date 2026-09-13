@@ -225,6 +225,10 @@ Deep Agents / LangGraph Runtime 负责：
 记录 Chat、Hint、DiagnosticRun 与审计日志
 ```
 
+可以把 Deep Agents / LangGraph Runtime 理解成 Agent Module 的工作流调度引擎。它本身不是给学生看的页面、不是数据库、也不是评分系统；它负责让一次 AI 请求按照正确的上下文、权限和工具顺序执行。
+
+例如学生问“为什么我的代码 hidden test 没过？”时，请求会先进入 Agent API，再交给 Runtime。Runtime 加载当前学生、课程、Lab、题目、Draft 和最新正式 Run 结果，然后执行 Teaching Orchestrator。Orchestrator 判断需要代码诊断时，会由 Runtime 调用 Private Debug Agent；Debug Agent 在私有边界读取 Tests 和运行证据，必要时调用 Diagnostic Sandbox 验证推断，最后只把结构化诊断交回 Orchestrator。Orchestrator 再生成不泄露 hidden tests 和完整答案的引导式 Hint。
+
 运行时只能调用后端暴露的 allowlisted tools。它不能直接写 `question_progress`、`lab_progress`、`code_runs` 的正式评分字段，也不能绕过 Website Core 创建正式 RunAttempt。
 
 ---
