@@ -417,7 +417,7 @@ Hint 风格偏好，例如先给问题引导，再给局部代码建议
 可还原具体 hidden test 输入、expected output 或断言的信息
 ```
 
-Memory 的写入必须经过总结和过滤步骤。Private Debug Agent 可以提供结构化观察，例如 `bug_category`、`affected_area` 和 `confidence`，但最终写入的只能是抽象学习模式。学生端 Orchestrator 可以读取当前学生自己的 Memory 来调整 Hint；教师端默认只能查看聚合后的学习模式，只有在被授权查看单个学生详情时才可以看到该学生的 Memory 摘要。
+Memory 的写入必须经过总结和过滤步骤。Private Debug Agent 可以提供结构化观察，例如 `bug_category`、`affected_area` 和 `confidence`，但最终写入的只能是抽象学习模式。学生端 Orchestrator 可以读取当前学生自己的 Memory 来调整 Hint；教师端只能查看聚合后的学习模式和误区趋势，不能查看单个学生的 Memory 摘要。
 
 ---
 
@@ -831,7 +831,8 @@ Chat message、Subagent 调用和 DiagnosticRun 可共享 trace ID，但该 trac
 9. Teaching Analytics Agent 只读正式数据，不重评分、不改成绩。
 10. 学生端 Agent 不能调用 Teaching Analytics Agent。
 11. Agent Memory 只能保存抽象学习模式，不能保存 hidden tests、完整源码、完整答案或其他学生信息。
-12. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
+12. 教师端只能查看聚合后的 Agent Memory 趋势，不能查看单个学生的 Memory 摘要。
+13. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
 
 ---
 
