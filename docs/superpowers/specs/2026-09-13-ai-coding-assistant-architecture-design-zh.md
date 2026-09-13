@@ -554,7 +554,9 @@ source location
 
 教师 Dashboard 是同一个 Coding Lab 网站里的教师权限视图，不是独立系统。教师可以像学生一样进入课程、Lab、题目和 Run 页面查看作业体验，同时额外看到班级级别的 Dashboard。
 
-教师默认先看聚合数据，再在异常情况下查看个别学生。
+教师默认先看聚合数据，再在异常情况下查看个别学生。查看个别学生时，教师可以看到该学生的作业代码、Draft / Run 快照、正式 Run 历史、stdout / stderr、测试结果、题目状态、分数和 Lab Progress。这些属于作业网站的正式教学与批改证据。
+
+这个权限不延伸到 Agent Memory。教师可以查看聚合后的 Agent Memory 趋势，例如班级里常见的误区类型和 Hint 偏好分布，但不能查看单个学生的 Agent Memory 摘要。
 
 ```mermaid
 flowchart LR
@@ -774,6 +776,7 @@ flowchart LR
 - 不把完整 tests、候选答案或完整诊断日志放进学生聊天上下文。
 - Deep Agents / LangGraph Runtime 只能通过 allowlisted tools 访问系统能力，不能直接访问或修改正式评分表。
 - 学生端 Agent 只能调用学生可见工具、Retrieval Agent 和 Private Debug Agent 的受限诊断能力，不能调用 Teaching Analytics Agent。
+- 教师可以查看单个学生的作业代码、正式 Run 历史、测试结果和进度；但不能查看单个学生的 Agent Memory 摘要。
 - Agent Service Account 对 Website Core 的正式评分表只有读取权限。
 - Diagnostic Sandbox 不拥有写分数或更新 Progress 的凭证。
 - Sandbox 默认禁用网络，并限制 CPU、内存、进程、文件系统和执行时间。
@@ -831,8 +834,9 @@ Chat message、Subagent 调用和 DiagnosticRun 可共享 trace ID，但该 trac
 9. Teaching Analytics Agent 只读正式数据，不重评分、不改成绩。
 10. 学生端 Agent 不能调用 Teaching Analytics Agent。
 11. Agent Memory 只能保存抽象学习模式，不能保存 hidden tests、完整源码、完整答案或其他学生信息。
-12. 教师端只能查看聚合后的 Agent Memory 趋势，不能查看单个学生的 Memory 摘要。
-13. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
+12. 教师可以查看单个学生的作业代码、Run 历史、测试结果和进度。
+13. 教师端只能查看聚合后的 Agent Memory 趋势，不能查看单个学生的 Memory 摘要。
+14. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
 
 ---
 
