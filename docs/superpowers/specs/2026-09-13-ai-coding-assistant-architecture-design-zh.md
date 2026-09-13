@@ -55,10 +55,11 @@ flowchart TD
     Core --> CoreTables[(MySQL Core Tables)]
     GradingSandbox --> CoreTables
 
-    AgentAPI --> Orchestrator[Teaching Orchestrator]
+    AgentAPI --> Runtime[Deep Agents / LangGraph Runtime]
     AgentAPI --> ReadTools[Website Core Read Tools]
     ReadTools --> CoreTables
 
+    Runtime --> Orchestrator[Teaching Orchestrator]
     Orchestrator --> Debug[Private Debug Agent]
     Orchestrator --> Retrieval[Retrieval Agent]
     Orchestrator --> Analytics[Teaching Analytics Agent]
@@ -70,7 +71,7 @@ flowchart TD
     Retrieval --> VectorDB[(Vector DB)]
     Analytics --> ReadTools
     Analytics --> AgentTables
-    Orchestrator --> AgentTables
+    Runtime --> AgentTables
 ```
 
 开发初期可以使用同一个 FastAPI 项目和同一个 MySQL 数据库，但必须在代码模块和数据库权限上分离 Website Core 与 Agent Module。
@@ -210,6 +211,22 @@ Agent Module 不做正式评分。它负责理解学生的问题，选择合适�
 分析班级共性问题和可能卡住的学生
 ```
 
+Agent Module 内部使用 Deep Agents / LangGraph 作为运行时和编排层。它不是 Website Core 的依赖，也不是评分引擎，而是负责把一次对话请求组织成可控的多步骤流程。
+
+Deep Agents / LangGraph Runtime 负责：
+
+```text
+加载请求级 AgentContext
+执行 Teaching Orchestrator
+根据意图路由到 Subagents
+管理工具调用顺序
+控制 Diagnostic Sandbox 调用预算
+执行 Hint policy 与 hidden-test 防泄露规则
+记录 Chat、Hint、DiagnosticRun 与审计日志
+```
+
+运行时只能调用后端暴露的 allowlisted tools。它不能直接写 `question_progress`、`lab_progress`、`code_runs` 的正式评分字段，也不能绕过 Website Core 创建正式 RunAttempt。
+
 ---
 
 ## 6. 主 Agent 与 Subagents
@@ -298,7 +315,9 @@ Stuck students
 
 ```mermaid
 flowchart TD
-    Request[学生或教师请求] --> Orchestrator[Teaching Orchestrator]
+    Request[学生或教师请求] --> Runtime[Deep Agents / LangGraph Runtime]
+    Runtime --> Context[加载 AgentContext]
+    Context --> Orchestrator[Teaching Orchestrator]
 
     Orchestrator -->|已有上下文足够| Direct[直接解释或 Hint]
     Orchestrator -->|代码分析或运行验证| Debug[Private Debug Agent]
@@ -309,7 +328,8 @@ flowchart TD
     Retrieval -->|相关资料片段| Orchestrator
     Analytics -->|分析结果| Orchestrator
     Direct --> Response[最终回答]
-    Orchestrator --> Response
+    Orchestrator --> Runtime
+    Runtime --> Response
 ```
 
 一个请求可以同时使用多个 Subagent。例如学生问“我的 recursion 为什么失败，PPT 有没有讲这种情况？”时，可以先调用 Private Debug Agent，再调用 Retrieval Agent。
@@ -644,6 +664,8 @@ GET  /questions/{lab_question_id}/assistant/stream
 GET  /teacher/labs/{lab_id}/insights
 ```
 
+Agent API 接收学生或教师请求后，先构造请求级 AgentContext，再交给 Deep Agents / LangGraph Runtime。Runtime 内部可以调度 Orchestrator、Subagents 和 allowlisted tools，但所有工具仍由后端做权限检查。
+
 ### 13.3 Student-facing Read Tools
 
 ```text
@@ -703,6 +725,7 @@ flowchart LR
 - 学生消息、代码注释、源码和 RAG 文档都是不可信输入，不能改变工具权限。
 - Orchestrator 不读取完整 hidden tests；只有 Private Debug Agent 可读取。
 - 不把完整 tests、候选答案或完整诊断日志放进学生聊天上下文。
+- Deep Agents / LangGraph Runtime 只能通过 allowlisted tools 访问系统能力，不能直接访问或修改正式评分表。
 - Agent Service Account 对 Website Core 的正式评分表只有读取权限。
 - Diagnostic Sandbox 不拥有写分数或更新 Progress 的凭证。
 - Sandbox 默认禁用网络，并限制 CPU、内存、进程、文件系统和执行时间。
@@ -804,6 +827,7 @@ Agent 替学生提交代码
 │   └── PASSED / Score / Progress
 │
 └── Agent Module
+    ├── Deep Agents / LangGraph Runtime
     ├── Teaching Orchestrator
     ├── Private Debug Agent
     │   └── Diagnostic Sandbox
