@@ -393,6 +393,32 @@ Current Draft revision 与代码
 | Agent Memory | 跨题目积累的学习偏好和误区 |
 | RAG Result | 本次问题检索到的课程资料片段 |
 
+### 7.4 Agent Memory
+
+Agent Memory 用来保存跨题目的轻量学习画像，让 Assistant 能用更适合该学生的方式提示。它只影响教学回复，不影响正式 Run、`PASSED`、分数或 Lab Progress。
+
+可以保存：
+
+```text
+学习偏好，例如更适合先看例子、伪代码或概念解释
+抽象误区，例如经常漏空输入、边界条件或 base case
+反复出现的调试模式，例如常把输出格式和逻辑错误混在一起
+Hint 风格偏好，例如先给问题引导，再给局部代码建议
+```
+
+不能保存：
+
+```text
+完整学生源码
+完整聊天记录
+完整 hidden tests
+完整候选答案
+其他学生信息
+可还原具体 hidden test 输入、expected output 或断言的信息
+```
+
+Memory 的写入必须经过总结和过滤步骤。Private Debug Agent 可以提供结构化观察，例如 `bug_category`、`affected_area` 和 `confidence`，但最终写入的只能是抽象学习模式。学生端 Orchestrator 可以读取当前学生自己的 Memory 来调整 Hint；教师端默认只能查看聚合后的学习模式，只有在被授权查看单个学生详情时才可以看到该学生的 Memory 摘要。
+
 ---
 
 ## 8. Diagnostic Sandbox
@@ -623,6 +649,22 @@ generated_experiment_id
 
 候选修复代码、完整 hidden tests 和完整诊断日志属于 Agent-private 数据，只允许 Private Debug Agent 与授权教师访问，并应有较短的保留期限。
 
+`agent_memory` 保存抽象后的学习模式，建议包含：
+
+```text
+user_id
+course_id nullable
+memory_type
+summary
+evidence_count
+confidence
+source_event_type
+last_observed_at
+expires_at nullable
+```
+
+`agent_memory.summary` 不能包含完整源码、完整答案、hidden tests、其他学生信息或可还原具体测试用例的信息。
+
 ### 12.3 数据关系
 
 ```mermaid
@@ -787,7 +829,9 @@ Chat message、Subagent 调用和 DiagnosticRun 可共享 trace ID，但该 trac
 7. 完整 hidden tests 只在私有 Agent 与沙箱边界内流转。
 8. 每个请求都被 `user_id + enrollment_id + lab_question_id` 约束。
 9. Teaching Analytics Agent 只读正式数据，不重评分、不改成绩。
-10. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
+10. 学生端 Agent 不能调用 Teaching Analytics Agent。
+11. Agent Memory 只能保存抽象学习模式，不能保存 hidden tests、完整源码、完整答案或其他学生信息。
+12. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
 
 ---
 
