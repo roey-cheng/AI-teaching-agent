@@ -4,7 +4,7 @@
 
 **日期：** 2026-09-13
 
-**核心技术：** React + TypeScript、Python + FastAPI、MySQL、LangChain Deep Agents / LangGraph、Vector DB、隔离代码沙箱
+**核心技术：** React + TypeScript、Python + FastAPI、MySQL、LangChain Deep Agents / LangGraph、Milvus（Vector DB）、隔离代码沙箱
 
 ---
 
@@ -73,7 +73,8 @@ flowchart TD
     Debug --> DiagnosticSandbox[Diagnostic Sandbox]
     DiagnosticSandbox --> AgentTables[(MySQL Agent Tables)]
 
-    Retrieval --> VectorDB[(Vector DB)]
+    Retrieval --> Milvus[(Milvus / Vector DB)]
+    Retrieval -->|课程资料不足时的受控后备| WebSearch[Web Search Tool]
     Analytics --> ReadTools
     Analytics --> AgentTables
     Runtime --> AgentTables
@@ -209,6 +210,7 @@ Agent Module 不做正式评分。它负责理解学生的问题，选择合适�
 理解当前题目、学生代码与正式 Run
 解释题意和编程概念
 检索课程 PPT、Lecture Notes 与 Lab Handout
+在课程资料不足且问题适合公开检索时，受控搜索可信网络资料
 分析编译、运行和测试失败
 验证学生提出的方法是否可行
 在私有环境中验证候选修复
@@ -292,7 +294,7 @@ Diagnostic Sandbox 输出
 
 ### 6.3 Retrieval Agent
 
-Retrieval Agent 负责搜索当前课程的资料：
+Retrieval Agent 优先搜索当前课程的资料：
 
 ```text
 PPT
@@ -302,7 +304,11 @@ Lab Handout
 Tutorial Notes
 ```
 
-它只搜索当前学生有权限访问的课程资料，并把相关片段交给 Orchestrator。
+它只搜索当前学生有权限访问的课程资料，并把相关片段交给 Orchestrator。如果课程 RAG 没有返回足够相关的内容，Retrieval Agent 可以根据工具策略判断是否调用受控的 `search_public_web()`。
+
+联网检索适用于公开的一般编程知识，例如语言官方文档、Library / API 的最新用法和公开的编译器错误说明。课程内部规则、评分要求、hidden tests 和当前作业的完整解法不能通过联网检索推断或获取。课程资料与公开网络来源发生冲突时，以课程资料为准；回答必须明确区分课程资料来源和互联网来源。
+
+联网前必须清理检索词，不能向外部搜索服务发送学生姓名、学号、完整源码、hidden tests、私有运行日志或其他课程内部数据。搜索得到的网页不会自动加入课程知识库或写入 Milvus；只有教师明确选择并发布为课程资料后，才能经过解析、切块和 Embedding 流程进入课程 RAG。
 
 ### 6.4 Teaching Analytics Agent
 
@@ -527,22 +533,32 @@ CPU / Memory / Process / Network Limits
 
 ---
 
-## 10. RAG 架构
+## 10. 课程 RAG 与受控 Web Search
 
 ```mermaid
-flowchart LR
+flowchart TD
     Docs[PPT / PDF / Notes / Handout]
     Parse[解析与切块]
     Embed[生成 Embedding]
-    Vector[(Vector DB)]
+    Milvus[(Milvus / Vector DB)]
     Retriever[按课程权限检索]
     Retrieval[Retrieval Agent]
     Orchestrator[Teaching Orchestrator]
+    Result[课程资料检索结果]
+    Relevant{资料是否足够相关}
+    WebPolicy{问题是否允许联网检索}
+    Web[受控 Web Search Tool]
+    NoSource[标记未找到可靠来源]
 
-    Docs --> Parse --> Embed --> Vector
+    Docs --> Parse --> Embed --> Milvus
     Orchestrator --> Retrieval
-    Retrieval --> Retriever --> Vector
-    Vector --> Retriever --> Retrieval --> Orchestrator
+    Retrieval --> Retriever --> Milvus
+    Milvus --> Result --> Relevant
+    Relevant -->|是| Retrieval
+    Relevant -->|否| WebPolicy
+    WebPolicy -->|是| Web --> Retrieval
+    WebPolicy -->|否| NoSource --> Retrieval
+    Retrieval --> Orchestrator
 ```
 
 每个文档块应带有：
@@ -554,6 +570,10 @@ document_version
 visibility
 source location
 ```
+
+检索顺序固定为：直接 Context、课程 RAG、受控 Web Search。已有题目、代码和正式 Run 证据足够时，Orchestrator 不需要调用 Retrieval Agent；调用 Retrieval Agent 后，必须先查询课程 RAG。只有课程资料没有足够相关证据，且问题属于可公开检索的一般编程知识时，才允许联网。
+
+如果 RAG 和受控联网都没有可靠结果，Agent 应明确说明无法从课程资料或可信公开来源确认，不能把模型猜测表述成课程规则。Grading Sandbox 与 Diagnostic Sandbox 仍然默认禁用网络；Web Search Tool 是 Agent Module 中独立的受控检索能力，不会为学生代码开放网络访问。
 
 当前题目、当前代码和正式 Run 结果属于直接 Context，不需要 RAG。
 
@@ -750,6 +770,14 @@ run_code_experiment(code, runtime, input?, expected_behavior?)
 
 Private Debug Tools 只能由 Private Debug Agent 调用。Tool 名称本身不代表权限；后端仍必须检查用户、课程、Lab、题目、enrollment 和 Agent capability。
 
+### 13.5 Controlled Web Search Tool
+
+```text
+search_public_web(sanitized_query, source_policy)
+```
+
+该工具只允许 Retrieval Agent 在课程 RAG 证据不足且问题适合公开检索时调用。`sanitized_query` 必须移除个人信息、完整学生源码、hidden tests 和课程内部数据；`source_policy` 用于优先选择语言、框架和 Library 的官方文档等可信来源。工具返回网页标题、URL、访问时间和允许引用的内容摘要，最终回答仍由 Teaching Orchestrator 执行 Hint policy 与来源标注。
+
 ---
 
 ## 14. 权限与安全边界
@@ -789,6 +817,10 @@ flowchart LR
 - 不把完整 tests、候选答案或完整诊断日志放进学生聊天上下文。
 - Deep Agents / LangGraph Runtime 只能通过 allowlisted tools 访问系统能力，不能直接访问或修改正式评分表。
 - 学生端 Agent 只能调用学生可见工具、Retrieval Agent 和 Private Debug Agent 的受限诊断能力，不能调用 Teaching Analytics Agent。
+- Retrieval Agent 必须先搜索课程 RAG，只有课程资料不足且问题适合公开检索时，才能调用 allowlisted Web Search Tool。
+- 联网检索词不能包含学生个人信息、完整源码、hidden tests、私有运行日志或课程内部数据。
+- 公开网络资料不能覆盖课程资料中的课程规则，也不能用于搜索当前作业的完整答案；网页来源必须与课程资料来源明确区分。
+- Web Search 结果不能自动写入 Milvus。只有教师明确发布的课程资料才能进入课程 RAG 索引流程。
 - 教师可以查看单个学生的作业代码、正式 Run 历史、测试结果和进度；但不能查看单个学生的 Agent Memory 摘要。
 - Agent Service Account 对 Website Core 的正式评分表只有读取权限。
 - Diagnostic Sandbox 不拥有写分数或更新 Progress 的凭证。
@@ -806,7 +838,9 @@ flowchart LR
 | Diagnostic Sandbox 超时 | Agent 给保守 Hint，不影响正式状态 |
 | Draft 在 Run 后变更 | 明确提示正式 Run 对应旧代码 |
 | 候选方案没有验证通过 | 不把它表达为可靠结论 |
-| RAG 不可用 | 基于直接 Context 回答，或说明无法确认课程资料 |
+| RAG 没有足够相关结果 | 仅在问题适合公开检索且策略允许时调用受控 Web Search，否则说明课程资料中没有找到依据 |
+| RAG 服务不可用 | 基于直接 Context 回答；不能把 Web Search 结果表述成课程内部规则 |
+| Web Search 不可用或没有可靠结果 | 给出基于已有证据的保守回答，并明确说明无法从可信公开来源确认 |
 | 私有 Tool 权限被拒绝 | 不猜测或泄露 hidden tests |
 | 多次 Run 乱序结束 | 使用 `attempt_number` 与单调事务更新 |
 
@@ -826,6 +860,7 @@ Subagent 路由结果
 DiagnosticRun 次数、耗时和超时率
 候选方案验证成功率
 RAG 检索耗时和文档来源
+Web Search 触发原因、耗时、来源 URL 和来源类型
 Hint Level 使用情况
 私有 Tests 访问审计
 ```
@@ -850,6 +885,10 @@ Chat message、Subagent 调用和 DiagnosticRun 可共享 trace ID，但该 trac
 12. 教师可以查看单个学生的作业代码、Run 历史、测试结果和进度。
 13. 教师端只能查看聚合后的 Agent Memory 趋势，不能查看单个学生的 Memory 摘要。
 14. Agent Module 故障不能阻塞 Website Core 的正式作业功能。
+15. Retrieval Agent 必须优先使用课程 RAG；公开网络资料不能覆盖课程规则或参与正式评分。
+16. Web Search 查询不能包含个人信息、完整学生源码、hidden tests 或课程内部数据。
+17. Web Search 结果不能自动写入 Milvus，必须经教师明确选择和课程资料发布流程才能进入 RAG。
+18. Grading Sandbox 与 Diagnostic Sandbox 默认禁用网络；Agent 的 Web Search Tool 不为学生代码提供网络访问。
 
 ---
 
@@ -864,6 +903,7 @@ Coding Lab 工作流
 题目级 AI Assistant
 私有诊断执行
 课程资料 RAG
+受控的公开网络资料检索
 学生进度与教师教学分析
 ```
 
@@ -900,7 +940,8 @@ Agent 替学生提交代码
     ├── Private Debug Agent
     │   └── Diagnostic Sandbox
     ├── Retrieval Agent
-    │   └── Vector DB / 课程资料
+    │   ├── Milvus / 课程资料
+    │   └── 受控 Web Search Tool
     ├── Teaching Analytics Agent
     └── Chat / Hint / Diagnostics / Memory
 ```
