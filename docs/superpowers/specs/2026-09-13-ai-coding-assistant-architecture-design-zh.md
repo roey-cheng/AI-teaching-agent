@@ -4,6 +4,8 @@
 
 **日期：** 2026-09-13
 
+**最后更新：** 2026-09-19（与第一版数据库设计同步）
+
 **核心技术：** React + TypeScript、Python + FastAPI、MySQL、LangChain Deep Agents / LangGraph、Milvus（Vector DB）、隔离代码沙箱
 
 ---
@@ -95,7 +97,7 @@ Course / Lab / Question 页面
 题目描述与 Starter Code
 代码编辑器和 Current Draft
 学生点击 Run
-正式 RunAttempt
+正式 Code Run
 Public / Hidden Tests
 题目通过状态
 题目分数
@@ -118,17 +120,16 @@ sequenceDiagram
     participant Sandbox as Grading Sandbox
 
     Student->>UI: 点击 Run
-    UI->>Core: 提交当前 Draft revision
-    Core->>DB: 创建正式 RunAttempt
-    Core->>Sandbox: 编译、执行并运行固定版本 Tests
+    UI->>Core: 点击 Run（携带 request_key）
+    Core->>DB: 复制 Current Draft 并创建 Code Run
+    Core->>Sandbox: 编译、执行已发布 Lab 的冻结 Tests
     Sandbox-->>Core: stdout、stderr、测试结果
-    Core->>DB: 保存代码快照和结果
+    Core->>DB: 保存 Test Results 和 Run 最终状态
 
     alt 全部必需 Tests 通过
-        Core->>DB: 更新题目 PASSED 与 awarded_score
-        Core->>DB: 更新 Lab Progress
+        Core->>DB: 首次通过时创建 Question Progress
     else 有 Test 失败
-        Core->>DB: 保存本次 Attempt 为 FAILED
+        Core->>DB: 保存本次 Code Run 为 FAILED
     end
 
     Core-->>UI: 返回本次 Run、题目状态和分数
@@ -136,18 +137,18 @@ sequenceDiagram
 
 ### 4.2 Run 结果、题目状态和分数必须分开
 
-一个 RunAttempt 只描述某一次执行：
+一个 Code Run 只描述某一次执行：
 
 ```text
-RunAttempt.result_status
+CodeRun.result_status
 = QUEUED | RUNNING | PASSED | FAILED | ERROR | TIMEOUT
 ```
 
-题目状态描述历史成就：
+Question Progress 是否存在，描述是否曾经通过：
 
 ```text
-QuestionProgress.status
-= NOT_STARTED | IN_PROGRESS | PASSED
+没有 QuestionProgress → 尚未通过
+存在 QuestionProgress → 已通过
 ```
 
 题目得分描述已经获得的成绩：
@@ -160,20 +161,20 @@ QuestionProgress.awarded_score
 
 ```text
 Run 1 → FAILED
-题目状态：IN_PROGRESS
+Question Progress：不存在
 分数：0 / 10
 
 Run 2 → PASSED
-题目状态：PASSED
+Question Progress：存在
 分数：10 / 10
 
 Run 3 → FAILED
 最新 Run：FAILED
-题目状态：仍然 PASSED
+Question Progress：仍然存在
 分数：仍然 10 / 10
 ```
 
-后续失败 Run 只能更新 `latest_run.status`，不能撤销 `PASSED` 或扣掉已经得到的分数。
+后续失败 Run 只记录自己的 `result_status`，不能删除已有的 `question_progress` 或扣掉已经得到的分数。
 
 ### 4.3 Lab 计分与完成
 
@@ -182,7 +183,7 @@ Run 3 → FAILED
 = 正式通过时获得 lab_questions.max_score
 
 Lab 已获分数
-= 所有已通过必做题的 awarded_score 之和
+= 所有已通过题目的 awarded_score 之和
 
 Lab COMPLETED
 = 所有 is_required = true 的题目都 PASSED
@@ -190,15 +191,11 @@ Lab COMPLETED
 
 系统不设置 Run 次数 penalty。学生可以运行多次；只要有一次正式 Run 通过，该题就获得满分。
 
-### 4.4 并发和版本
+### 4.4 并发、幂等与内容冻结
 
-每次点击 Run 分配递增的 `attempt_number`，用来定义“学生最后一次点击的 Run”。即使多个 Run 的完成顺序不同，题目状态仍然只能单调变化：
+每次点击 Run 由前端生成 `request_key`；网络重试复用同一个键，后端以 `enrollment_id + request_key` 幂等返回同一条 Run。最新 Run 按 `created_at + code_run_id` 查询；即使多个 Run 的完成顺序不同，已经创建的 `question_progress` 也不会被后续失败删除。
 
-```text
-NOT_STARTED → IN_PROGRESS → PASSED
-```
-
-`code_runs` 还应记录 `question_version` 与 `test_suite_version`。教师修改题目或 Tests 时必须发布新版本，不能静默改变旧 Run 的评分依据。
+第一版不建立 Question Version 或 Test Suite Version。Lab 发布后，其题目内容、运行配置和 Tests 全部冻结；需要修改时复制成新的 Question 或新的 Lab，旧 Run 继续引用原 `lab_question_id`。
 
 ---
 
@@ -236,7 +233,7 @@ Deep Agents / LangGraph Runtime 负责：
 
 例如学生问“为什么我的代码 hidden test 没过？”时，请求会先进入 Agent API，再交给 Runtime。Runtime 加载当前学生、课程、Lab、题目、Draft 和最新正式 Run 结果，然后执行 Teaching Orchestrator。Orchestrator 判断需要代码诊断时，会由 Runtime 调用 Private Debug Agent；Debug Agent 在私有边界读取 Tests 和运行证据，必要时调用 Diagnostic Sandbox 验证推断，最后只把结构化诊断交回 Orchestrator。Orchestrator 再生成不泄露 hidden tests 和完整答案的引导式 Hint。
 
-运行时只能调用后端暴露的 allowlisted tools。它不能直接写 `question_progress`、`lab_progress`、`code_runs` 的正式评分字段，也不能绕过 Website Core 创建正式 RunAttempt。
+运行时只能调用后端暴露的 allowlisted tools。它不能直接写 `question_progress` 或 `code_runs` 的正式评分字段，也不能绕过 Website Core 创建正式 Code Run。Lab Progress 由 `question_progress` 实时汇总，不单独写表。
 
 ---
 
@@ -390,7 +387,7 @@ question_id
 
 ```text
 题目描述、Starter Code、Learning Objectives
-Current Draft revision 与代码
+Current Draft 当前代码
 最新正式 Run 摘要
 学生可见的测试结果
 题目 PASSED 状态和已获分数
@@ -458,12 +455,12 @@ Orchestrator 可以在以下情况委托 Private Debug Agent 调用：
 
 ### 8.2 诊断来源
 
-一个 `DiagnosticRun` 必须且只能使用一种代码来源：
+一个 `DiagnosticRun` 必须保存实际执行的代码快照，并标明一种来源：
 
 ```text
-OFFICIAL_RUN_SNAPSHOT
-DRAFT_REVISION
-GENERATED_EXPERIMENT
+CODE_RUN
+DRAFT
+GENERATED
 ```
 
 Private Debug Agent 可以在代码副本上临时应用候选修复，但不能写回学生 Draft。
@@ -523,8 +520,8 @@ CPU / Memory / Process / Network Limits
 | 触发者 | 学生点击 Run | Private Debug Agent |
 | 所属模块 | Website Core | Agent Module |
 | 代码来源 | Current Draft 快照 | Run 快照、Draft、候选修复或实验代码 |
-| Tests | 固定发布版本 | 最小用例或私有完整 Test Suite |
-| 是否创建正式 RunAttempt | 是 | 否 |
+| Tests | 已发布 Lab 中冻结的 Tests | 最小用例或私有完整 Test Suite |
+| 是否创建正式 Code Run | 是 | 否 |
 | 是否影响 PASSED / Score | 是，由 Website Core 更新 | 永远不影响 |
 | 是否计入学生 Run 次数 | 是 | 否 |
 | 结果存储 | Core Tables | Agent Tables |
@@ -564,9 +561,9 @@ flowchart TD
 每个文档块应带有：
 
 ```text
-course_id
+chunk_id
+course_instance_id
 document_id
-document_version
 visibility
 source location
 ```
@@ -620,19 +617,20 @@ Stuck Detection 默认只分析尚未 `PASSED` 的题目。已经通过的题目
 
 ```text
 users
-enrollments
 courses
+course_instances
+enrollments
 labs
 questions
 lab_questions
-question_versions
 question_tests
-test_suite_versions
 code_drafts
 code_runs
 test_results
 question_progress
-lab_progress
+course_documents
+document_chunks
+audit_logs
 ```
 
 关键字段：
@@ -640,58 +638,51 @@ lab_progress
 ```text
 lab_questions.is_required
 lab_questions.max_score
-code_runs.attempt_number
-code_runs.idempotency_key
+code_runs.request_key
+code_runs.code_snapshot
 code_runs.result_status
-code_runs.question_version
-code_runs.test_suite_version
-question_progress.status
 question_progress.successful_run_id
 question_progress.awarded_score
-question_progress.passed_question_version
-question_progress.passed_test_suite_version
 ```
+
+第一版没有 `question_versions`、`test_suite_versions` 或 `lab_progress` 表。发布后的 Lab 内容整体冻结；Lab Progress 从 `lab_questions` 与 `question_progress` 实时汇总。
 
 ### 12.2 Agent Tables
 
 ```text
 chat_sessions
 messages
-hint_records
 diagnostic_runs
-diagnostic_experiments
 agent_memory
-analytics_cache
+retrieval_events
+retrieval_sources
 ```
 
-`chat_sessions`、`hint_records` 和 `diagnostic_runs` 都需要关联：
+`chat_sessions` 和 `diagnostic_runs` 都需要关联：
 
 ```text
 enrollment_id + lab_question_id
 ```
 
-`diagnostic_runs` 使用 `source_type`，并通过数据库约束保证以下三个字段恰好一个非空：
+Hint Level 保存在 Assistant Message 中，不单独建立 Hint Record。`diagnostic_runs` 总是保存实际代码快照；只有来源为 `CODE_RUN` 时才填写 `reference_code_run_id`：
 
 ```text
-reference_run_id
-draft_revision_id
-generated_experiment_id
+source_type = DRAFT | CODE_RUN | GENERATED
+code_snapshot
+reference_code_run_id nullable
 ```
 
 候选修复代码、完整 hidden tests 和完整诊断日志属于 Agent-private 数据，只允许 Private Debug Agent 与授权教师访问，并应有较短的保留期限。
 
-`agent_memory` 保存抽象后的学习模式，建议包含：
+`agent_memory` 按 Enrollment 隔离，保存抽象后的学习模式，建议包含：
 
 ```text
-user_id
-course_id nullable
+enrollment_id
 memory_type
 summary
 evidence_count
 confidence
-source_event_type
-last_observed_at
-expires_at nullable
+status
 ```
 
 `agent_memory.summary` 不能包含完整源码、完整答案、hidden tests、其他学生信息或可还原具体测试用例的信息。
@@ -701,8 +692,9 @@ expires_at nullable
 ```mermaid
 erDiagram
     USERS ||--o{ ENROLLMENTS : has
-    COURSES ||--o{ ENROLLMENTS : contains
-    COURSES ||--o{ LABS : contains
+    COURSES ||--o{ COURSE_INSTANCES : offers
+    COURSE_INSTANCES ||--o{ ENROLLMENTS : contains
+    COURSE_INSTANCES ||--o{ LABS : contains
     LABS ||--o{ LAB_QUESTIONS : assigns
     QUESTIONS ||--o{ LAB_QUESTIONS : reused_as
     LAB_QUESTIONS ||--o{ CODE_DRAFTS : has
@@ -711,8 +703,11 @@ erDiagram
     LAB_QUESTIONS ||--o{ QUESTION_PROGRESS : tracks
     LAB_QUESTIONS ||--o{ CHAT_SESSIONS : scopes
     CHAT_SESSIONS ||--o{ MESSAGES : contains
-    CHAT_SESSIONS ||--o{ HINT_RECORDS : records
-    CHAT_SESSIONS ||--o{ DIAGNOSTIC_RUNS : requests
+    MESSAGES o|--o{ DIAGNOSTIC_RUNS : requests
+    COURSE_INSTANCES ||--o{ COURSE_DOCUMENTS : publishes
+    COURSE_DOCUMENTS ||--o{ DOCUMENT_CHUNKS : splits_into
+    MESSAGES ||--o{ RETRIEVAL_EVENTS : triggers
+    RETRIEVAL_EVENTS ||--o{ RETRIEVAL_SOURCES : uses
 ```
 
 ---
@@ -762,9 +757,9 @@ search_course_material(query)
 ### 13.4 Private Debug Tools
 
 ```text
-get_full_test_suite_for_debug(lab_question_id, test_suite_version)
+get_full_test_suite_for_debug(lab_question_id)
 validate_candidate_fix(reference_run_id, candidate_patch, extra_cases?)
-validate_draft_approach(draft_revision_id, candidate_patch?, test_scope)
+validate_draft_approach(code_snapshot, candidate_patch?, test_scope)
 run_code_experiment(code, runtime, input?, expected_behavior?)
 ```
 
@@ -842,7 +837,7 @@ flowchart LR
 | RAG 服务不可用 | 基于直接 Context 回答；不能把 Web Search 结果表述成课程内部规则 |
 | Web Search 不可用或没有可靠结果 | 给出基于已有证据的保守回答，并明确说明无法从可信公开来源确认 |
 | 私有 Tool 权限被拒绝 | 不猜测或泄露 hidden tests |
-| 多次 Run 乱序结束 | 使用 `attempt_number` 与单调事务更新 |
+| 多次 Run 乱序结束 | 每条 Run 独立完成；`question_progress` 只做幂等插入，不回退 |
 
 ---
 
@@ -871,8 +866,8 @@ Chat message、Subagent 调用和 DiagnosticRun 可共享 trace ID，但该 trac
 
 ## 17. 关键不变量
 
-1. 只有学生点击 Run 才能创建计分的正式 RunAttempt。
-2. 只有 Website Core 可以修改题目状态、题目分数和 Lab Progress。
+1. 只有学生点击 Run 才能创建计分的正式 Code Run。
+2. 只有 Website Core 可以写入 `question_progress`；Lab Progress 只从正式进度实时汇总。
 3. 后续失败 Run 不能撤销之前通过获得的分数。
 4. `DiagnosticRun` 永远不能成为 `successful_run_id`，也不进入正式 Run 次数。
 5. Teaching Orchestrator 不接收 raw hidden tests 或完整候选答案。
