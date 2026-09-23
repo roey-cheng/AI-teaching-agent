@@ -1,0 +1,38 @@
+# 这是本地开发用的数据库启动配置，不是生产部署配置。
+# 在项目根目录执行 docker compose up -d db，才会下载镜像并启动数据库。
+name: ai-teaching-assistant
+
+services:
+  # db 是我们给数据库服务起的名字，不是数据库中的表名。
+  db:
+    # 使用包含 MySQL 服务端的镜像；8.4 固定版本系列，不追随 latest。
+    image: mysql:8.4
+
+    # 左边是本机地址和端口，右边是容器里的 MySQL 端口。
+    # 只向本机开放，不直接向局域网或公网开放。
+    ports:
+      - "127.0.0.1:3306:3306"
+
+    # Compose 从根目录 .env 读取密码。:? 表示缺失或为空时拒绝启动。
+    # 这些变量仅在数据目录首次初始化时创建数据库和账号。
+    # 已经初始化后，仅修改 .env 不会自动修改数据库中的密码。
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请先在根目录 .env 填写管理员密码}
+      MYSQL_DATABASE: ai_teaching_assistant
+      MYSQL_USER: ai_teaching_app
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先在根目录 .env 填写应用数据库密码}
+
+    # 使用支持中文和 emoji 的字符集。
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+
+    # 数据保存在独立数据卷里，普通停止或重建容器不会删除这个卷。
+    # 删除数据卷仍然会丢失数据库；不要随意运行 docker compose down -v。
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+# 声明数据卷，实际名称由 Compose 加上项目名前缀，避免和其他项目混用。
+# 数据卷保留数据不等于已经做了备份。
+volumes:
+  mysql_data:

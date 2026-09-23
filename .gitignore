@@ -1,1 +1,34 @@
 .worktrees/
+
+# macOS 本地文件
+.DS_Store
+
+# 本地配置可能包含密码和 API Key；配置示例允许提交
+.env
+.env.*
+!.env.example
+
+# Python 本地环境和生成文件
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# 前端依赖、缓存和构建产物
+node_modules/
+.vite/
+*.tsbuildinfo
+frontend/dist/
+
+# 后端构建产物
+backend/build/
+backend/dist/
+
+# uv.lock 和 package-lock.json 后续需要提交，不忽略它们
