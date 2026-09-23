@@ -1,0 +1,37 @@
+:root {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  color: #18293d;
+  background: #f4f7fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.65;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+.page { width: min(760px, 100%); margin: 0 auto; padding: 64px 24px 40px; }
+.eyebrow { color: #46608c; font-size: 12px; font-weight: 700; letter-spacing: 0.14em; }
+h1 { font-size: clamp(26px, 5vw, 36px); line-height: 1.35; letter-spacing: -0.04em; }
+.intro, .detail, .note { color: #536379; }
+.card { margin: 32px 0; padding: 28px; border: 1px solid #dce4ef; border-radius: 18px; background: white; box-shadow: 0 12px 32px #243e6510; }
+.label { margin-top: 0; font-size: 13px; color: #536379; }
+.status { font-size: 26px; margin: 12px 0; }
+.status.success { color: #176545; }
+.status.error { color: #a32932; }
+.detail { min-height: 28px; overflow-wrap: anywhere; }
+code { background: #eef3f8; padding: 3px 6px; border-radius: 4px; font-size: 0.9em; }
+button { margin-top: 8px; border: 0; border-radius: 9px; padding: 12px 18px; background: #244c87; color: white; font: inherit; font-weight: 600; cursor: pointer; }
+button:hover:not(:disabled) { background: #183a6c; }
+button:focus-visible { outline: 3px solid #699fe9; outline-offset: 4px; }
+button:disabled { opacity: 0.6; cursor: wait; }
+.explanation h2 { font-size: 17px; }
+ol { padding-left: 24px; }
+li { padding: 6px 0 8px 8px; }
+li::marker { color: #46608c; font-weight: 600; }
+li span { display: block; color: #536379; font-size: 14px; }
+.note { margin-top: 28px; font-size: 13px; }
+@media (max-width: 480px) {
+  .page { padding: 32px 18px; }
+  .card { padding: 22px; }
+}
