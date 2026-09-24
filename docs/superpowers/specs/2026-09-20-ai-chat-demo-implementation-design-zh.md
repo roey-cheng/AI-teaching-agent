@@ -23,6 +23,8 @@ React + TypeScript 前端，FastAPI 后端，MySQL 保存数据。所有 AI 聊�
 
 ## 2. 五张核心表
 
+字段级细化见 [2026-09-24 表设计草案](2026-09-24-ai-chat-demo-database-design-zh.md)，目前待共同确认，尚未建表。草案建议物理列沿用原总设计的 `chat_session_id`，下文及 API 的 `session_id` 为其对外名称；不创建两套会话 ID。其余补充字段、约束及与完整系统的差异在草案中逐项说明。
+
 ### 2.1 逻辑结构
 
 下表用于指导 ORM 和 Migration，还不是建表 SQL。字段命名在后续代码中统一，API 对外 ID 一律表示为字符串。
@@ -60,7 +62,7 @@ messages 的生成元数据仅用于 USER，ASSISTANT 相应字段为空。每�
 
 [完整数据库文档](2026-09-18-ai-coding-assistant-database-design-zh.md)继续描述 Coding Lab。Demo 的会话和记忆直接关联 user_id，不预置课程、Lab、题目和 Enrollment。
 
-本版消息表增加最新生成元数据来支持失败重试。记忆只覆盖明确陈述的偏好、目标和编程背景，使用 LEARNING_PREFERENCE、LEARNING_GOAL、PROGRAMMING_BACKGROUND；不沿用完整教学系统的所有分类或证据字段。今后引入课程、审计历史和证据模型时另做迁移。
+本版消息表增加最新生成元数据来支持失败重试。记忆覆盖明确陈述且适合长期保存的回答偏好、学习目标、编程背景、个人背景和日常偏好，使用 LEARNING_PREFERENCE、LEARNING_GOAL、PROGRAMMING_BACKGROUND、PERSONAL_BACKGROUND、DAILY_PREFERENCE；不沿用完整教学系统的所有分类或证据字段。今后引入课程、审计历史和证据模型时另做迁移。
 
 ## 3. Deep Agents 与上下文
 
@@ -93,8 +95,10 @@ messages 的生成元数据仅用于 USER，ASSISTANT 相应字段为空。每�
 给 Agent 配置项目自定义工具 save_profile_facts，提交具体主题和值。此函数需要我们实现，不是框架自动提供的 MySQL 接口。
 
 - user_id、当前问题和运行编号由后端注入，模型不能指定其他用户。
-- 只提取用户明确表达的学习目标、编程背景和回答偏好；含义不明则不更新。
-- 使用稳定主题，例如 preference.language、preference.explanation_style、learning.goal、learning.current_topic、programming.level。初版限制在这些主题内，每条摘要最多 500 字符。
+- 只提取用户明确表达、对后续交流有用且适合长期保留的背景、目标和偏好，不限于教育类信息；含义不明则不更新。
+- 使用稳定主题。候选允许列表为[表设计草案第 8 节的 25 个主题](2026-09-24-ai-chat-demo-database-design-zh.md#8-agent_memory个人长期记忆)，分为回答偏好 8 个、学习目标 2 个、编程背景 5 个、个人背景 6 个、日常偏好 4 个；具体 key/type 对应以该表为准，每条摘要最多 500 字符。无需填满所有主题，也不因增加主题而增加表或公开接口。后端、工具参数和数据库 CHECK 的允许列表必须一致。
+- 个人主题遵循上述表设计的敏感信息排除规则；不猜测身份或位置，地点最细到城市、作息只存粗略习惯。称呼记忆不自动修改账号 display_name，不增加日历或提醒能力。长期记忆排除某类信息不等于 messages 已脱敏；真实用户开放前另行确认记忆告知、控制与删除方案。
+- 只记明确的长期偏好与用户自述；一次临时指令不自动改长期偏好，问过某知识不等于已掌握。已有知识、语言、工具等摘要的顺序更新需保留仍有效的旧事实并合并明确补充；纠正与更新规则见上述表设计，仍不承诺同主题并发自动合并。
 - 按 user_id + memory_key 更新或插入，只处理此次涉及的主题；不拿旧 Profile 全文覆盖数据库。
 - 不同主题的更新互不覆盖。同主题同时修改采用实际数据库提交顺序后写生效，本版不承诺按原陈述时间自动裁决冲突。
 - 用唯一约束避免重复条目；不计算 evidence_count，不维护来源证据台账或用户级 profile_version。

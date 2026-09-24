@@ -28,7 +28,35 @@
 
 以上库还会自动安装它们所需的其他依赖，包括 LangGraph。安装了模型相关库不代表已经选定模型提供方，也不会自动调用模型。
 
-MySQL 驱动已安装，数据库配置读取和独立连接检查代码已编写。SQLAlchemy、Alembic 将在后续阶段添加，目前没有 ORM、业务表或迁移文件。
+MySQL 驱动、SQLAlchemy 和 Alembic 已安装，数据库配置读取和独立连接检查代码已编写。目前五张业务表的 ORM 模型已实现，尚未通过迁移创建业务表，没有迁移文件；接口 Pydantic Schema 尚未编写。
+
+### 第一张表模型：users
+
+- `app/db/base.py`：共同的 ORM 基类，收集表结构；不连接数据库。
+- `app/models/user.py`：描述 users 的九个字段、唯一约束、CHECK 和 MySQL 类型，附中文注释。
+- `app/models/__init__.py`：集中导入已经实现的模型。
+- `tests/test_user_model.py`：检查模型结构，并离线生成 MySQL 建表 SQL 文本；不会执行 SQL。
+
+在 `backend/` 中运行 `uv run python -m unittest discover -s tests -p 'test_user_model.py' -v` 可检查模型。测试通过只表示 Python 映射和 SQL 编译符合预期，不代表真实 MySQL 已建表或约束已生效；这些留到迁移阶段验证。此阶段不调用 `create_all()`，也不执行 Alembic 迁移。
+
+### 其他四张表模型
+
+| 文件 | 描述的业务表 | 重点 |
+|---|---|---|
+| `app/models/auth_session.py` | auth_sessions：登录状态 | 凭据哈希唯一，登录到期和撤销时间 |
+| `app/models/chat_session.py` | chat_sessions：聊天会话 | 用户归属、标题、手动命名标记、侧栏活动时间 |
+| `app/models/message.py` | messages：问题和回复 | 自引用外键、发送键防重复、USER/ASSISTANT 字段规则 |
+| `app/models/agent_memory.py` | agent_memory：个人记忆 | 每用户每主题唯一，25 个固定主题与分类配对 |
+
+`app/models/__init__.py` 统一导入五个模型，结构登记到同一个 `Base.metadata`。记忆主题允许列表 `MEMORY_TOPIC_TYPES` 与 CHECK 来源一致，供后续 Schema、工具和服务复用；未来迁移应冻结当时的约束，不直接引用不断变化的模型常量。
+
+`tests/test_chat_models.py` 离线检查字段、外键目标、索引、唯一约束、CHECK 声明及全部表和索引的 MySQL SQL 编译。运行：
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
+
+本次未添加 Engine、数据库会话、业务服务或迁移。模型也不会自动执行密码哈希、邮箱规范化、登录鉴权、消息重试、记忆更新或 UTC 转换；这些仍是后续业务职责。CHECK、唯一约束及外键是否在真实 MySQL 中生效，仍须迁移阶段的隔离数据库测试验证。
 
 ### 如何使用
 
