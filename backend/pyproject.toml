@@ -5,11 +5,13 @@ description = "AI Teaching Assistant backend"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "alembic>=1.20.0",
     "deepagents>=0.7.15,<0.8",
     "fastapi>=0.141.1,<0.142",
     "langchain-deepseek>=1,<2",
     "pydantic-settings>=2.15.0,<3",
     "pymysql[rsa]>=1.2.3",
+    "sqlalchemy>=2.0.54",
     "uvicorn>=0.53.0,<0.54",
 ]
 

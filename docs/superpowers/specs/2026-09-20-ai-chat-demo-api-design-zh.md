@@ -423,7 +423,9 @@ GET /api/v1/me/memory，要求登录，返回本人实际保存的摘要：
 }
 ~~~
 
-无记忆返回 items=[]；按 updated_at DESC, memory_id DESC 排序。本版围绕明确陈述的回答偏好、学习目标和编程背景，类型使用 LEARNING_PREFERENCE、LEARNING_GOAL、PROGRAMMING_BACKGROUND；与完整教学系统的分类差异在 Demo 内部设计中记录。
+无记忆返回 items=[]；按 updated_at DESC, memory_id DESC 排序。本版覆盖明确陈述且适合长期保留的回答偏好、学习目标、编程背景、个人背景和日常偏好，类型使用 LEARNING_PREFERENCE、LEARNING_GOAL、PROGRAMMING_BACKGROUND、PERSONAL_BACKGROUND、DAILY_PREFERENCE。前端需支持这五种展示分类；与完整教学系统的分类差异在 Demo 内部设计中记录。
+
+候选主题及敏感信息排除规则以[表设计草案第 8 节](2026-09-24-ai-chat-demo-database-design-zh.md#8-agent_memory个人长期记忆)的 25 个主题为准。本次仅扩充记忆内容和分类，不改变响应字段或增加公开接口；不自动修改账号昵称，也不增加提醒或日历功能。长期记忆过滤不等于聊天原文已脱敏。面向真实用户开放前，需另行确认记忆告知、控制与删除方案。
 
 Agent 从 MySQL 投影出的虚拟 /memories/profile.md 读取记忆，并调用本项目自定义的 save_profile_facts 工具保存具体条目。页面和 Agent 使用同一份数据，不另存实际 Markdown 文件。该工具不是公开接口，也不是声称框架自带此函数。
 

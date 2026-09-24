@@ -76,5 +76,6 @@ npm run dev
 - [功能范围与决策](docs/superpowers/specs/2026-09-20-ai-chat-demo-scope-and-decisions-zh.md)
 - [API 设计](docs/superpowers/specs/2026-09-20-ai-chat-demo-api-design-zh.md)
 - [内部实现设计与开发顺序](docs/superpowers/specs/2026-09-20-ai-chat-demo-implementation-design-zh.md)
+- [第一版数据库表设计草案（待确认）](docs/superpowers/specs/2026-09-24-ai-chat-demo-database-design-zh.md)
 
 原完整架构与数据库文档继续作为后续教学系统的设计参考。第一版按上面三份文档实施。

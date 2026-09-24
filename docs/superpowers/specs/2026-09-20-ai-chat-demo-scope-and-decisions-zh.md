@@ -33,7 +33,7 @@
 | 聊天 | 失败重试 | 仅最后一条、已确认失败的问题可以重试；复用原问题，不重复保存 |
 | 历史 | 持久化 | 用户消息、已完成回答、最新生成状态保存在 MySQL |
 | 历史 | 历史加载 | 页面一次读取当前会话全部消息，不做 cursor 分页；不同时读取其他会话的消息，也不把全部历史自动交给模型 |
-| Memory | 提取、保存、跨会话读取 | 明确的学习目标、编程背景和回答偏好，按主题更新 |
+| Memory | 提取、保存、跨会话读取 | 明确且适合长期保留的学习目标、编程背景、回答偏好、个人背景和日常偏好，按主题更新 |
 | Memory | Profile Memory 页面 | 只查看实际保存的摘要，无手动编辑、删除、开关 |
 
 “失败重试”保留；“成功回答不好，重新生成一个版本”不做。重试复用原 USER，用户主动重新发送同样文字则创建新 USER，两者不能混用。
@@ -86,7 +86,7 @@ Agent 配置读取当前用户的虚拟 Profile，并使用我们实现的 save_
 
 完整架构与数据库文档保留为后续教学系统目标。本 Demo 会话和记忆直接关联 user_id，不使用完整设计中的 Enrollment 与题目外键，不预置课程、Lab、题目或 Enrollment。
 
-Demo 记忆类型以 LEARNING_PREFERENCE、LEARNING_GOAL、PROGRAMMING_BACKGROUND 为当前范围。具体字段和分类差异以内部设计为准，不声称完整数据库文档原本就是第一版结构。
+Demo 记忆类型以 LEARNING_PREFERENCE、LEARNING_GOAL、PROGRAMMING_BACKGROUND、PERSONAL_BACKGROUND、DAILY_PREFERENCE 为当前范围。[表设计草案第 8 节](2026-09-24-ai-chat-demo-database-design-zh.md#8-agent_memory个人长期记忆)列出 25 个候选主题及个人信息边界；不要求填满，不主动收集敏感信息。本次不新增记忆管理接口；面向真实用户开放前，需另行确认记忆告知、控制与删除方案。具体字段和分类差异以内部设计为准，不声称完整数据库文档原本就是第一版结构。
 
 课程管理、代码编辑器、运行评分、沙箱、课程 RAG、Milvus、文件上传、联网搜索和教师 Dashboard 都不在此次交付中。
 
