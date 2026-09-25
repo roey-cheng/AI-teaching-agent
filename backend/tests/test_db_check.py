@@ -43,7 +43,7 @@ class DatabaseCheckTest(unittest.TestCase):
         self.assertEqual(result, 0)
         cursor.execute.assert_called_once_with("SELECT 1")
         connection.close.assert_called_once()
-        self.assertIn("连接成功", output)
+        self.assertIn("connection successful", output)
 
     def test_query_failure_closes_connection_without_leaking_error(self):
         connection = MagicMock()

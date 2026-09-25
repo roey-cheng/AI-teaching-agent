@@ -30,7 +30,7 @@ class DatabaseSettings(BaseSettings):
     @classmethod
     def password_must_not_be_blank(cls, value: SecretStr) -> SecretStr:
         if not value.get_secret_value().strip():
-            raise ValueError("DB_PASSWORD 不能为空")
+            raise ValueError("DB_PASSWORD must not be blank")
         return value
 
 
@@ -61,7 +61,7 @@ class ModelSettings(BaseSettings):
     @classmethod
     def name_must_not_be_blank(cls, value: str) -> str:
         if not value.strip() or value != value.strip():
-            raise ValueError("MODEL_NAME 不能为空或包含首尾空格")
+            raise ValueError("MODEL_NAME must not be blank or contain leading or trailing whitespace")
         return value
 
     @field_validator("api_key")
@@ -69,7 +69,7 @@ class ModelSettings(BaseSettings):
     def key_must_have_no_whitespace(cls, value: SecretStr) -> SecretStr:
         raw = value.get_secret_value()
         if not raw or any(character.isspace() for character in raw):
-            raise ValueError("MODEL_API_KEY 不能为空或包含空白字符")
+            raise ValueError("MODEL_API_KEY must not be blank or contain whitespace")
         return value
 
 

@@ -2,9 +2,9 @@
 
 **创建日期：** 2026-09-20
 
-**更新日期：** 2026-09-21
+**更新日期：** 2026-09-25
 
-**状态：** 当前实现依据，尚未实现或验收
+**状态：** 当前实现依据；请求/响应数据 Schema 已编写并通过离线测试，业务逻辑、接口接入和端到端验收尚未完成。
 
 **API 前缀：** /api/v1
 
@@ -48,11 +48,13 @@
 {
   "error": {
     "code": "SESSION_NOT_FOUND",
-    "message": "会话不存在或不可访问",
+    "message": "Session not found or inaccessible.",
     "request_id": "req_example"
   }
 }
 ~~~
+
+错误的 code、message、request_id 均为必填非空字符串；code 最多 64 字符、message 最多 500 字符，与现有 SSE 错误约束一致。程序生成的公开错误提示使用英文，不强制翻译用户内容。Schema 只检查输出形状，不自动生成请求编号、设置 HTTP 状态码或清理原始异常中的敏感信息；这些由后续异常处理器负责。
 
 | HTTP 状态 | 含义 |
 |---|---|
@@ -139,7 +141,9 @@
 }
 ```
 
-邮箱采用与注册一致的规范化方式。成功返回 `200 OK`，设置登录 Cookie，并返回：
+邮箱采用与注册一致的规范化方式。密码必填，接收 1～128 字符，不自动裁剪或改变大小写；登录不套用注册时设置新密码的 8 字符下限。格式合规不代表密码正确，验证失败仍按下述规则返回 `401 INVALID_CREDENTIALS`；缺失、空字符串、错误类型、超长或未知请求字段返回 `422 VALIDATION_ERROR`。
+
+成功返回 `200 OK`，设置登录 Cookie，并返回：
 
 ```json
 {
@@ -270,7 +274,7 @@ GET /api/v1/chat/sessions/{session_id}/messages，无分页参数，要求登录
         "assistant_message_id": null,
         "error": {
           "code": "GENERATION_TIMEOUT",
-          "message": "回复生成超时，可以重试。"
+          "message": "Response generation timed out. Please try again."
         },
         "can_retry": true
       }

@@ -10,6 +10,8 @@ AI-teaching-agent/
 ├── .env.example         Docker 数据库密码模板，不含真实密码
 ├── backend/
 │   ├── app/             后端入口、/health、数据库配置及独立连接检查代码
+│   ├── alembic/         数据库迁移环境与版本脚本
+│   ├── alembic.ini      迁移目录配置，不含密码
 │   ├── tests/           后端接口测试
 │   ├── .env.example     后端配置模板，不含真实密码或密钥
 │   ├── .python-version  后端使用的 Python 版本
@@ -37,6 +39,8 @@ AI-teaching-agent/
 
 后端已验证 Python 3.14.7、FastAPI、Uvicorn、Deep Agents 和配置库可正常使用；安装与检查命令见 [后端说明](backend/README.md)。
 
+2026-09-25：五张表模型、第一版 API 数据 Schema、SQLAlchemy 连接检查和 Alembic 初始迁移脚本已编写。137 项离线测试通过，另在独立临时 MySQL 8.4.11 完成 9 组真实约束/数据测试及升级、回退再升级验证；临时资源已清理，用户随后报告项目数据库建表成功。复测方法见[后端迁移说明](backend/README.md#alembic-初始迁移)。Schema 已补齐不等于业务接口已实现，下一阶段是业务逻辑和接口接入。
+
 前后端已可分别启动，前端通过开发代理访问后端。已通过后端健康接口测试、前端类型检查与打包，以及实际 HTTP 直连和代理请求检查。浏览器自动验证因本机 UI 控制超时未完成，打开页面确认显示结果的步骤见 [前端说明](frontend/README.md)。用户已报告 Python 数据库检查成功；2026-09-24 已通过 Deep Agents → DeepSeek 的独立真实流式检查，收到 43 段文字。登录、网页聊天、SSE 和长期记忆仍未接入，不能把独立探针当作完整业务已完成。
 
 ## 启动连接检查页面
@@ -61,7 +65,7 @@ npm run dev
 
 ## 本地配置
 
-本机 MySQL 8.4.11 已通过 Docker 启动，项目数据库和账号已初始化；容器内和本机 3306 端口的客户端登录及 `SELECT 1` 测试均通过。根目录本地 `.env` 已填写密码，不提交 Git。启动、连接和停止步骤见 [本地 MySQL 说明](docs/local-mysql-setup-zh.md)。尚未创建业务表。PyMySQL 已安装，用户已报告运行 Python 数据库检查成功；重新检查的方法见 [后端说明](backend/README.md)。
+本机 MySQL 8.4.11 已通过 Docker 启动，项目数据库和账号已初始化；容器内和本机 3306 端口的客户端登录及 `SELECT 1` 测试均通过。根目录本地 `.env` 已填写密码，不提交 Git。启动、连接和停止步骤见 [本地 MySQL 说明](docs/local-mysql-setup-zh.md)。用户已报告迁移建表成功，业务数据仍待后续注册、聊天等功能写入。PyMySQL 已安装，用户已报告运行 Python 数据库检查成功；重新检查的方法见 [后端说明](backend/README.md)。
 
 需要配置时，在各目录中将 `.env.example` 复制为 `.env`，再填写本机信息。`.env` 用于本地真实配置，已加入 Git 忽略规则；`.env.example` 保留在仓库中，供其他开发者了解需要哪些配置项。
 

@@ -79,7 +79,7 @@ async def stream_answer(agent) -> int:
                 print(text, end="", flush=True)
                 count += 1
     if not count or finish_reason != "stop":
-        raise RuntimeError("没有收到正常结束的完整回答")
+        raise RuntimeError("No complete answer with a normal finish was received")
     return count
 
 
@@ -87,36 +87,36 @@ async def main() -> int:
     try:
         settings = load_model_settings()
     except (ValidationError, SettingsError, OSError):
-        print("模型配置无效：检查 backend/.env 的 MODEL_*，密钥不能有空格，地址须为 DeepSeek 官方地址。")
+        print("Invalid model configuration: check MODEL_* in backend/.env; the API key must have no whitespace and the URL must be an official DeepSeek endpoint.")
         return 1
 
-    print("开始 Deep Agents 最小检查（一次模型调用；不读写数据库）。")
-    print(f"问题：{QUESTION}\n回答：", end="", flush=True)
+    print("Starting the minimal Deep Agents check (one model call; no database reads or writes).")
+    print(f"Question: {QUESTION}\nAnswer: ", end="", flush=True)
     try:
         # 不向 LangSmith 上传这次运行记录。总等待不超过 60 秒。
         with tracing_context(enabled=False):
             async with asyncio.timeout(60):
                 count = await stream_answer(build_probe_agent(settings))
     except AuthenticationError:
-        print("\n认证失败：请检查 API Key；不要把密钥发到聊天里。")
+        print("\nAuthentication failed: check your API key; do not share it in chat.")
         return 1
     except (APITimeoutError, TimeoutError):
-        print("\n请求超时：本次未完成，不自动重试。")
+        print("\nRequest timed out: the check did not complete; no automatic retry.")
         return 1
     except APIConnectionError:
-        print("\n网络连接失败：检查网络及代理，不自动重试。")
+        print("\nNetwork connection failed: check your network and proxy; no automatic retry.")
         return 1
     except APIStatusError as error:
-        print(f"\n模型服务返回 HTTP {error.status_code}：检查模型名称、余额或服务限流。")
+        print(f"\nModel service returned HTTP {error.status_code}: check the model name, account balance, or rate limits.")
         return 1
     except Exception:
         # 不打印原始异常、请求对象或设置，避免意外泄露密钥。
-        print("\n检查未完成：模型输出不完整或 Agent 执行失败；不自动重试。")
+        print("\nCheck incomplete: model output was incomplete or the Agent failed; no automatic retry.")
         return 1
-    print(f"\n检查成功：收到 {count} 段非空回答文字，模型正常结束。")
+    print(f"\nCheck successful: received {count} non-empty text chunks; the model finished normally.")
     if count < 2:
-        print("此次只有一段文字，尚未观察到多段增量输出。")
-    print("这只是终端测试；网页聊天、SSE 接口及长期记忆尚未接入。")
+        print("Only one text chunk was received; multiple incremental chunks have not yet been observed.")
+    print("This is a terminal-only test; web chat, SSE endpoints, and long-term memory are not integrated yet.")
     return 0
 
 
