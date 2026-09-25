@@ -15,7 +15,7 @@ def main() -> int:
         # 第一步：读取 backend/.env 的数据库配置。
         settings = load_database_settings()
     except (ValidationError, SettingsError, OSError):
-        print("配置读取失败：请检查 backend/.env 的 DB_* 字段；密码不能为空，端口必须合法。")
+        print("Invalid database configuration: check DB_* in backend/.env; password must not be blank and port must be valid.")
         return 1
 
     try:
@@ -28,14 +28,14 @@ def main() -> int:
                 cursor.execute("SELECT 1")  # 只读查询，不创建表、不写入业务数据。
                 result = cursor.fetchone()
         if result != (1,):
-            print("数据库检查失败：SELECT 1 没有返回预期结果。")
+            print("Database check failed: SELECT 1 did not return the expected result.")
             return 1
     except (pymysql.MySQLError, OSError):
         # 不输出原始异常、连接参数或密码。真实故障可在下一步单独排查。
-        print("数据库连接或查询失败：请检查 MySQL 是否启动，以及地址、端口、账号、密码和权限。")
+        print("Database connection or query failed: check the MySQL service, host, port, credentials, and permissions.")
         return 1
 
-    print("数据库连接成功：SELECT 1 返回 1，连接已关闭。")
+    print("Database connection successful: SELECT 1 returned 1; connection closed.")
     return 0
 
 
