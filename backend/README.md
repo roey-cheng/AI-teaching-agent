@@ -27,11 +27,11 @@
 | langchain-deepseek | 1.1.1 | 将 DeepSeek 模型接到 Deep Agents，已验证真实流式调用 |
 | pydantic-settings | 2.15.0 | 读取和校验数据库配置 |
 | PyMySQL（含 rsa 依赖） | 1.2.3 | Python 连接 MySQL 的驱动 |
-| argon2-cffi | 25.1.0 | 已为后续注册功能安装的密码哈希工具；尚未编写或接入注册业务逻辑 |
+| argon2-cffi | 25.1.0 | 注册业务使用的 Argon2id 密码哈希工具，自动生成随机盐 |
 
 以上库还会自动安装它们所需的其他依赖，包括 LangGraph。安装了模型相关库不代表已经选定模型提供方，也不会自动调用模型。
 
-MySQL 驱动、SQLAlchemy 和 Alembic 已安装，数据库配置读取和独立连接检查代码已编写。目前五张业务表的 ORM 模型、Alembic 配置和首份迁移脚本已实现，并通过独立临时 MySQL 8.4.11 的真实迁移验收；用户随后已报告项目数据库建表成功。已完成注册、当前用户、登录、会话、消息、SSE 数据、记忆响应及通用 HTTP 错误响应的 Pydantic Schema；业务服务、业务接口和统一异常处理器尚未实现。本次补 Schema 只运行离线测试，没有连接或修改项目数据库。
+MySQL 驱动、SQLAlchemy 和 Alembic 已安装，数据库配置读取和独立连接检查代码已编写。目前五张业务表模型、迁移、API Schema、账号、会话和只读历史业务已有离线/隔离 MySQL 验证，用户已报告项目库建表成功。已有最小单进程运行登记、消息准入与 USER 保存、防重和中断清理；新增输入组装与准入前的保守预算检查。执行期预算保护、限流、Agent 执行、重试、启动残留清理、HTTP/SSE、Cookie 和网页尚未接入。本次没有连接或修改项目数据库，也没有调用模型。
 
 ### 第一张表模型：users
 
@@ -135,7 +135,7 @@ Database connection successful: SELECT 1 returned 1; connection closed.
 uv run python -m unittest discover -s tests -v
 ```
 
-当前共 137 项测试通过（包括 /health、数据库与模型探针、五张 ORM 表模型、SQLAlchemy 连接检查的离线测试、账号/会话/消息/SSE/记忆/通用错误数据 Schema 校验，以及 11 项迁移离线测试）。这些测试使用虚构配置、模拟调用或离线 SQL 编译，不访问真实数据库或模型，也不产生 API 费用。应用模块导入不会自动读取配置或连接数据库；Alembic 的 env.py 则是命令执行入口，在线命令会连接数据库。/health 的行为保持不变。
+当前共 244 项离线测试通过（本次新增 19 项输入组装与预算测试）。覆盖 /health、数据库与模型探针、五张 ORM 表模型、SQLAlchemy 连接检查、全部 API Schema、迁移及已实现业务。这些测试使用虚构配置、模拟调用、离线 SQL 编译或本地哈希计算，不访问真实数据库或模型，也不产生 API 费用。应用模块导入不会自动读取配置或连接数据库；Alembic 在线命令会连接数据库。/health 的行为保持不变。
 
 参考：[Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)、[PyMySQL 连接参数](https://pymysql.readthedocs.io/en/latest/modules/connections.html)。
 
@@ -225,7 +225,7 @@ uv run alembic upgrade head --sql
 backend/.venv/bin/python backend/scripts/check_migration_mysql.py
 ```
 
-当前有 137 项离线测试，真实验收的 9 组用例单独统计。以上不代表账号/聊天业务已实现；用户隔离、同会话回复校验、失败重试及迟到结果保护仍待业务层测试。隔离验收结束时项目库仍为空；用户随后已报告手动完成项目库建表。
+当前有 244 项离线测试，真实验收共 78 组（本次新增 8 组输入组装/预算/隔离测试）。已验证 USER 保存及准入前的输入组装，但不代表完整聊天可用；执行期预算保护、限流、模型执行、ASSISTANT 保存业务、重试、迟到结果写入保护、启动/故障后自动核对仍待实现。初次隔离验收结束时项目库仍为空；用户随后已报告手动完成项目库建表。之后的业务测试仍只在新建的临时容器里运行。
 
 参考：[Alembic 迁移环境](https://alembic.sqlalchemy.org/en/latest/tutorial.html)、[自动生成与审阅限制](https://alembic.sqlalchemy.org/en/latest/autogenerate.html)。
 
@@ -336,7 +336,215 @@ uv run python -m unittest discover -s tests -p 'test_message_schemas.py' -v
 
 新增记忆 11 项、通用错误 8 项离线测试，覆盖 ORM 投影、五类记忆、字段过滤、长度/ID/时间边界、JSON Schema 与序列化、空列表、严格类型、错误外壳和与 SSE 错误字段的一致性。没有安装 FastAPI 异常处理器，运行时 `/health` 不受影响。
 
-到这里，第一版已讨论的 API 请求/响应数据格式已补齐；GET 查询和 204 退出响应不为凑数量创建空 Schema。接口路由、查询参数拒绝、认证、异常处理及业务逻辑仍未实现，不等于 11 个业务接口已经可用。
+到这里，第一版已讨论的 API 请求/响应数据格式已补齐；GET 查询和 204 退出响应不为凑数量创建空 Schema。随后已实现下面的注册和登录业务逻辑；接口路由、Cookie 认证、查询参数拒绝、异常处理及其他业务仍未实现，不等于 11 个业务接口已经可用。
+
+## 注册业务逻辑：先做服务，尚未接 HTTP 接口
+
+目标：接收已由 `RegisterRequest` 校验的资料，创建一名普通用户，成功提交后返回 `RegisterResponse`。不自动登录，不写 auth_sessions、聊天或记忆，不创建 Cookie，不处理验证码或找回密码。
+
+| 文件 | 负责什么 |
+|---|---|
+| `app/db/session.py` | `build_session_factory(engine)` 准备独立 ORM Session 的工厂；Session 用于本次查询、提交、回滚和关闭，不是登录状态 |
+| `app/core/passwords.py` | `hash_password(SecretStr)` 使用 Argon2id 计算密码哈希；不打印或存储原密码 |
+| `app/services/auth.py` | `register_user(request, session_factory)` 串起查重、哈希、插入、提交和公开响应 |
+| `app/services/errors.py` | 邮箱已注册及注册结果无法确认的安全业务异常；没有 HTTP 依赖 |
+| `tests/test_passwords.py`、`tests/test_registration_service.py` | 密码哈希与模拟连接测试，普通测试不访问数据库 |
+| `scripts/registration_mysql_cases.py` | 真实 MySQL 注册用例，只由隔离测试脚本注入临时 Engine |
+
+注册处理顺序：
+
+1. 用短读取 Session 查询规范化后的邮箱。已有账号时抛出 `EmailAlreadyRegisteredError`，错误代号 `EMAIL_ALREADY_REGISTERED`，不计算哈希或修改原账号。
+2. 关闭读取 Session 后再计算密码哈希，不在数据库事务中等待耗时的密码计算。使用 argon2-cffi 的 RFC_9106_LOW_MEMORY 参数：Argon2id、64 MiB、3 次迭代、并行度 4、随机盐。盐和参数已经包含在编码后的哈希里，不需要新增数据库列。密码不裁剪、不改大小写，不把 SecretStr 的星号掩码当作原密码。
+3. 创建 `User`，角色固定 USER、状态固定 ACTIVE；创建和更新时间使用相同 UTC 值，last_login_at 为 NULL。编号由数据库生成。
+4. 开启新的短写事务，`add()` 登记对象，`flush()` 执行 INSERT 并拿到编号，先校验可公开的响应，再退出事务上下文完成提交。只有提交成功才返回用户编号、邮箱、昵称和 UTC 注册时间，不返回密码、哈希或完整 ORM 对象。
+5. 查重不是并发锁。两个请求都查到空时，由 MySQL 的 `uq_users_email` 唯一约束兜底。只有该约束的 1062 错误会映射成邮箱重复，不能把其他 SQL 错误都说成邮箱重复。
+6. 上下文负责正常提交、异常回滚及关闭 Session。数据库或哈希失败返回安全的 `RegistrationUnavailableError`（代号 `REGISTRATION_UNAVAILABLE`），不暴露原始 SQL、异常、密码或连接信息，不自动重试。提交时断线可能无法确定是否落库，因此错误不保证“账号一定没创建”；需通过登录等方式核对，不能直接重复执行写入。
+
+这是一段同步服务函数，不是 `/api/v1/auth/register` 路由。将来接口层需提供通过校验的请求、共享 Engine 创建的 Session 工厂，并负责 HTTP 201/409/503、Origin、限流、请求编号和安全错误转换。每次业务调用使用自己的 Session，不跨请求或线程共享；同步数据库/哈希计算不能直接塞进 async 路由阻塞事件循环。Engine 在应用生命周期复用，不在每次注册结束时 dispose。
+
+真实验证：独立临时 MySQL 8.4.11 中的 5 组注册用例均通过：提交后新连接能读到账号、哈希验证原密码、响应不泄露哈希且不自动登录、规范化重复邮箱拒绝、两个并发请求只有一个成功、提交前故障回滚后可重新注册、哈希失败不插入账号。提交前注入故障的回滚验证不等于“网络断开时提交结果一定可知”。连同原迁移用例，共 14 组通过；临时容器和账号数据已删除，没有更改项目数据库。
+
+从 backend 目录运行离线检查：
+
+```bash
+uv run python -m unittest discover -s tests
+```
+
+真实验收仍从项目根目录运行 `backend/.venv/bin/python backend/scripts/check_migration_mysql.py`，它自建、自清理隔离容器，不接受项目数据库作为目标。后续才实现注册路由和前端页面；目前打开网站仍只有 /health 检查。
+
+参考：[argon2-cffi 密码哈希 API](https://argon2-cffi.readthedocs.io/en/stable/api.html)、[SQLAlchemy Session 与事务](https://docs.sqlalchemy.org/en/20/orm/session_basics.html)。
+
+## 登录业务逻辑：尚未接 HTTP / Cookie
+
+`app/services/login.py` 的 `login_user(request, session_factory, current_token=None)` 接收已校验的 `LoginRequest`，只处理登录，不承担随后每次请求的登录状态检查或退出。`current_token` 将来由接口从 Cookie 读取并包装成 SecretStr，不能作为请求 JSON 新字段由前端指定。
+
+| 文件 | 职责 |
+|---|---|
+| `app/core/passwords.py` / `verify_password` | 用 Argon2 工具验证原密码与已保存哈希；不通过重新生成随机哈希后比较字符串来验证 |
+| `app/core/tokens.py` | 生成 32 字节随机登录凭据（URL-safe 编码为 43 字符），仅将 SHA-256 哈希写库 |
+| `app/services/login.py` | 查询用户、验证密码、复核账号、轮换当前凭据、更新登录时间、保存登录状态 |
+| `LoginResult` | 仅供后端内部使用的结果：公开 LoginResponse + SecretStr 凭据 + UTC 到期时间；不是接口 JSON |
+| `tests/test_login_service.py`、`scripts/login_mysql_cases.py` | 离线规则验证与临时 MySQL 的真实事务验证 |
+
+处理顺序：先短查询获取用户编号、密码哈希和状态，关闭读取 Session 后做密码验证。未知邮箱也用公开的占位哈希执行一次验证，不会因此创建账号或登录；这减少直接快速失败的差异，不承诺绝对恒定耗时。未知邮箱、错误密码、禁用账号均为 `INVALID_CREDENTIALS`。损坏的密码哈希也不能通过认证。后续接口必须加限流，并避免记录密码、凭据或原始请求。
+
+密码验证成功后生成全新凭据。在一个短写事务内，锁定并重新检查用户仍 ACTIVE、密码哈希未改变，防止验证期间改密/禁用后仍签发凭据。记录登录时间和 updated_at；新 auth_sessions 的 expires_at 固定为 created_at + 7 天，revoked_at 初始为空。如果当前 Cookie 对应尚未过期/撤销的记录，同一事务只撤销这一条（切换账号也适用），不退出其他设备；不存在、畸形或过期旧凭据不阻止用正确密码重新登录。失败登录不撤销已有凭据。
+
+只有提交成功才返回 `LoginResult`。未来接口仅将 `result.response` 序列化成约定的 `{"user": {...}}` JSON；使用 `result.token.get_secret_value()` 设置 HttpOnly/SameSite/Path/Secure 等 Cookie，不能把整个内部结果当 HTTP 正文返回或记录原凭据。随机凭据用 SHA-256，用户密码仍用 Argon2id，不混用两种哈希用途。
+
+数据库失败统一为安全业务错误 `LOGIN_UNAVAILABLE`，不返回未确认提交的凭据、不自动重试；接口层将来映射为 503。提交断线可能产生未交付给浏览器的记录，不能承诺它一定没落库。Cookie 设置、Origin 校验、限流、HTTP 状态及请求编号仍待接口层处理；密码哈希参数升级/自动重哈希也没有在本次实现。
+
+新增 12 项离线测试及 8 组真实 MySQL 用例；真实验证了凭据哈希持久化、固定 7 天、更新登录时间、统一凭据错误、轮换当前凭据保留其他设备、切换账号、过期/畸形 Cookie、错误密码不撤销旧登录、提交前故障整体回滚，以及验证期间禁用账号后拒绝登录。累计 163 项离线测试、22 组隔离 MySQL 用例通过，临时容器与测试数据均已清理，没有操作项目数据库。
+
+参考：[Python secrets](https://docs.python.org/3/library/secrets.html)、[argon2-cffi verify](https://argon2-cffi.readthedocs.io/en/stable/api.html)。
+
+## 登录状态检查业务：只读、不续期
+
+入口是 `app/services/authentication.py` 的 `get_current_user(token, session_factory)`。以后接口从 Cookie 取出凭据，包装成 SecretStr 再调用；这个函数本身不接触 HTTP，不接收前端指定的 user_id，也不重新验证密码。
+
+1. 缺少凭据或格式错误时直接拒绝，不连接数据库。
+2. 复用 `hash_session_token` 算出哈希，一条 JOIN 查询把 auth_sessions 与所属 users 记录关联起来；只读取用户编号、邮箱、昵称、账号状态、到期及撤销时间，不读取密码哈希。
+3. 记录不存在、已撤销、expires_at 小于或等于当前 UTC 时间、账号不是 ACTIVE，统一抛出 `AuthenticationRequiredError`（UNAUTHENTICATED）。
+4. 通过检查后，用已有 `UserResponse` 返回公开的用户编号、邮箱和昵称。读取 Session 关闭；不提交写入，不修改登录时间或到期时间，不删除过期记录。
+5. 数据库故障单独抛出 `AuthenticationUnavailableError`（AUTHENTICATION_UNAVAILABLE），不泄露底层异常，不自动重试。未来接口分别映射为 401 和 503，并补充统一错误格式；暂未实现这些 HTTP 映射。
+
+这是查询时刻的身份检查，不会锁住账号直到后续业务完成；撤销或禁用后的新检查会拒绝，但不承诺中止已通过检查的在途操作。未来聊天/记忆业务仍必须按返回的用户编号限制数据访问，不能把身份检查当成完整的资源权限检查。
+
+`tests/test_authentication_service.py` 新增 8 项离线测试；`scripts/authentication_mysql_cases.py` 新增 5 组真实 MySQL 测试，验证注册→登录→检查的完整链路、两个用户身份不混淆、未知凭据、微秒级到期边界、轮换后的旧凭据拒绝、其他设备仍有效、禁用后拒绝，以及多次检查不修改任何登录/用户字段。累计 171 项离线和 27 组隔离 MySQL 测试通过。没有改动数据库表结构，没有接入路由或退出业务。
+
+## 退出登录业务：只撤销当前凭据
+
+`app/services/logout.py` 的 `logout_user(token, session_factory)` 接收当前凭据（SecretStr 或 None），正常完成返回 None。它不创建 HTTP 响应、不清除浏览器 Cookie，不依赖 `get_current_user` 先通过：过期、撤销或禁用账号仍应能完成退出。
+
+1. 没带凭据或格式不合法：直接成功，不查询数据库。
+2. 合法格式的凭据：计算哈希，在短事务中执行一条条件 UPDATE，仅对哈希匹配、尚未撤销且尚未过期的 auth_sessions 设置 revoked_at 为当前 UTC 时间。
+3. 影响 0 行也成功（未知、已过期、已撤销）；重复/并发退出不会覆盖原撤销时间。事务提交后才向调用方报告成功。
+4. 不修改其他登录记录、用户、聊天或记忆；禁用账号无需重新通过登录检查，也可以撤销所持凭据。
+5. 数据库执行或提交故障使用 `LogoutUnavailableError`（LOGOUT_UNAVAILABLE），未来接口映射 503，不泄露 SQL 或凭据，不自动重试。提交断线可能无法确认结果，不能声称一定退出成功或一定未提交；调用方后续重复退出是安全的。
+
+未来接口成功时清除同名、同 Path 的 Cookie 并返回 204；无凭据也清 Cookie。Origin 校验仍必须按写请求约定执行，不能因为退出允许无效凭据就跳过。数据库故障不能伪装 204 成功。这些接口行为尚未实现。
+
+新增 `tests/test_logout_service.py`（6 项离线）和 `scripts/logout_mysql_cases.py`（6 组真实 MySQL）：验证登录→检查→退出→旧凭据拒绝、其他设备/用户不受影响、业务数据原样保留、重复/并发退出、无效/过期凭据、禁用账号退出，以及提交前故障回滚。累计 177 项离线和 33 组隔离 MySQL 测试通过，测试容器及数据已清理。没有修改项目数据库、表结构或 HTTP 路由。
+
+## 新建聊天会话业务：第一步
+
+按“新建 → 列表 → 重命名”逐项实现和讲解，第一步是 `app/services/chat_sessions.py` 的 `create_chat_session(current_user, session_factory)`，返回已有的 SessionResponse。列表和重命名实现见后续两节。
+
+- `current_user` 必须是后端调用 `get_current_user()` 完成身份验证后的 UserResponse，不得直接从前端请求正文构造。此函数不自行读取 Cookie 或重复检查登录；身份检查和实际操作间的禁用/撤销边界沿用前文约定。
+- 在短事务中新增 ChatSession：user_id 取当前用户编号，title="new chat session"（保留用户的英文标题修改），title_is_manual=false，created_at、updated_at、last_activity_at 使用同一个 UTC 时间。ORM/初始迁移的数据库默认值仍是“新对话”，此业务显式写入英文值，不修改旧迁移。
+- `add()` 登记待保存对象；`flush()` 真正执行 INSERT 并取得数据库编号，但尚未提交；SessionResponse 先校验/筛选返回字段，事务提交成功后才返回。
+- 每次成功调用创建一个独立空会话，不写消息、记忆或登录记录，不调用 Agent。首条消息生成默认标题留到消息业务；不改 ORM、Schema 或迁移。
+- SQLAlchemy 数据库故障转换成 SessionUnavailableError（SESSION_UNAVAILABLE），未来接口映射 503。提交结果不明时不自动重试、不声称一定没建成；未来前端先刷新列表再决定是否重新创建。
+- 未来 POST /api/v1/chat/sessions 仍只接受 CreateSessionRequest `{}`，接口负责先验证身份与请求体。这里不新增 HTTP 路由，不改变 API 字段。
+
+新建阶段新增 6 项离线测试（`tests/test_chat_session_service.py`）和 5 组真实 MySQL 测试（`scripts/chat_session_mysql_cases.py`）：验证默认值/UTC 时间、真实自增编号、多次创建与用户归属、其他表不变、提交前故障回滚及响应校验失败后 INSERT 回滚。当时累计 183 项离线和 38 组隔离 MySQL 测试通过；临时容器及测试数据已清理，不操作项目数据库。
+
+## 查询会话列表业务：第二步
+
+同一业务文件新增 `list_chat_sessions(current_user, session_factory) -> SessionListResponse`。调用方仍须先用 `get_current_user()` 验证身份，不从请求正文或查询参数构造所属用户。
+
+1. 一条 SELECT 查询 chat_sessions，WHERE 强制限定当前用户的 user_id。
+2. 数据库按 last_activity_at DESC、chat_session_id DESC 排序，最近活跃在前，同时间按数值编号倒序。不是按 updated_at 排序，所以未来单纯改名不会置顶。
+3. `.all()` 读取此用户全部会话，不分页、不截断；逐条用 SessionResponse 整理为公开字段，再包装进 items。无数据返回 items=[]，不创建空会话。
+4. 不读取 messages，不修改任何记录或时间，不调用模型。查询 Session 正常关闭，不进行写入提交。
+5. 数据库查询/读取故障使用既有 SessionUnavailableError（SESSION_UNAVAILABLE），不伪装空列表、不自动重试。未来 HTTP 层映射为 503。
+
+列表阶段新增 6 项离线和 4 组真实 MySQL 用例：验证只返回本人、无会话但别人有会话时仍为空、活动时间与编号排序、105 条全部返回、公开字段/UTC/大整数编号、单次查询只读会话表且全部表数据不变，以及查询故障。当时累计 189 项离线和 42 组真实 MySQL 验收通过，临时容器及数据已清理。不改项目数据库、表结构、Schema 或 HTTP 路由。
+
+## 重命名会话业务：第三步
+
+`rename_chat_session(current_user, session_id, request, session_factory)` 复用已认证的 UserResponse、现有 RenameSessionRequest 和 SessionResponse。标题由请求 Schema 去首尾空白后检查 1～100 字符；会话编号复用 format_database_id 校验，错误编号在查库前抛 ValueError，未来接口映射 422。
+
+- 短事务中按 chat_session_id + 当前 user_id 查询并 SELECT FOR UPDATE 锁住记录；不存在或不属于本人统一 SessionNotFoundError（SESSION_NOT_FOUND，未来 404）。不返回其他用户数据。
+- 只设置 title、title_is_manual=true、updated_at；即使标题没变也标记手动命名。created_at、last_activity_at、所属用户均不变，因此改名不置顶。
+- 同会话并发改名由数据库行锁串行执行，后执行写入者的标题最终生效。不检查生成状态，允许 RUNNING 时改名；未来自动标题更新必须在同一会话行锁规则下尊重 title_is_manual，不能覆盖手动标题。
+- flush 后验证响应，提交成功再返回。数据库故障沿用 SESSION_UNAVAILABLE，不自动重试、不泄露原始错误。响应校验错误也会使事务回滚，由未来统一异常处理器处理为安全的服务端错误。
+- 无 HTTP 路由、Cookie、模型或消息业务改动，不新增字段或迁移。当前用户仍须来自调用方的身份验证，不能来自前端自报。
+
+新增 8 项离线测试和 6 组真实 MySQL 验收：正常/同名/100 字符改名、非法标题/编号、他人或不存在会话、活动时间与其他数据不变、RUNNING 时允许改名、提交/响应故障回滚及并发改名。保留用户已将新建标题改为英文的代码，并同步该项测试和说明。累计 197 项离线、48 组隔离 MySQL 测试通过；临时容器和数据已清理，项目数据库未修改。会话管理三项业务至此完成，历史消息等消息业务另行实现。
+
+## 读取历史消息业务：只读与运行状态协调
+
+入口：`app/services/message_history.py` 的 `get_message_history(current_user, session_id, session_factory, registry)`。当前用户必须来自后端认证，registry 必须是应用生命周期共享的 GenerationRegistry，不提供默认空登记。尚未接 HTTP，也没有真实生成任务。
+
+1. 校验编号，在当前会话短锁内新建数据库 Session；按会话编号和当前用户检查归属。不存在/不属于本人统一 SESSION_NOT_FOUND，拒绝后不查询消息。
+2. 一次读取该会话全部 Message，按 created_at ASC、message_id ASC 排序；不跨会话加载，不分页、不截断、不写数据或修改活动时间。
+3. 将 USER 的平铺生成字段组装为 generation；从当前会话的 ASSISTANT 引用建立成功回答编号。保留正文缩进；ASSISTANT 不输出 generation，内部模型标识、发送键和前驱编号不外露。
+4. 只有会话无运行登记、问题是最后一条 USER、状态 FAILED 时 can_retry=true。旧问题的失败不会因新问题成功而消失。失败摘要只使用固定白名单（超时、中断、模型请求失败）；未知代码降级为 GENERATION_FAILED，数据库原始错误文字一律不直接返回。
+5. 运行登记有当前 attempt_id 时 is_generating=true；即使已经保存 SUCCEEDED/FAILED、仍在清理，也保持忙碌。RUNNING 必须与最后问题和登记吻合；孤立 RUNNING、编号不匹配或问答配对矛盾，拒绝返回不一致的历史。
+6. 数据库/快照校验/运行状态不一致统一 MessageHistoryUnavailableError（MESSAGE_HISTORY_UNAVAILABLE，未来 503）。不会返回假空列表、虚假空闲或擅自修复状态。读取本身不会清理重启残留 RUNNING；启动清理仍待生成服务阶段实现。
+
+最小支撑位于 `app/services/generation_registry.py`：按会话提供同步短锁、claim(attempt_id)、release(attempt_id)；忙碌时拒绝第二次占用，旧编号不能释放新编号。无占用且无调用者/等待者的条目自动回收。它不是执行器，没有任务引用、取消或重启恢复实现。
+
+未来发送、重试、最终保存和清理必须使用同一份 registry，并在对应短锁内完成状态切换与数据库提交；创建消息失败时撤销本次占用，提交结果不明时不得盲目释放。不能跨模型等待或 await 持锁；异步路由应将整个同步数据库业务函数放在线程池执行，不能在事件循环中直接等待 threading.Lock。仅支持单进程，实际运行接入前必须完成启动清理与应用生命周期装配。
+
+新增 12 项历史/4 项登记离线测试、8 组真实 MySQL 验收，覆盖空历史、越权拒绝、完整问答关联、旧失败后新成功、清理期忙碌、残留状态拒绝、跨会话错误引用、错误脱敏、105 条完整读取、所有表只读及历史等待最终保存后取得一致快照。累计 213 项离线和 56 组隔离 MySQL 测试通过，临时容器/数据已清理；项目数据库及表结构未修改。
+
+## 发送第一步：消息准入与保存
+
+2026-09-26 新增 `app/services/message_submission.py`。`accept_user_message(current_user, session_id, request, session_factory, registry, *, check_new_message, input_policy)` 是必须用 with 的内部上下文管理器，不是公开 HTTP 接口或普通“发完即走”的函数。
+
+### 进入时：接收、查重和保存
+
+1. 调用方先认证；服务校验编号并复制校验后的 SendMessageRequest，保留原正文、缩进和换行，避免调用方之后修改请求影响清理。
+2. 在共享 registry 的当前会话短锁内开事务，按会话编号+用户锁定 chat_sessions 行。不存在和越权统一 SESSION_NOT_FOUND。
+3. 先按会话+client_message_key 查重：同键同正文返回现有 DuplicateMessageResponse，不新建记录、不调用准入检查、也不拥有原任务清理权；同键不同正文报 IDEMPOTENCY_CONFLICT。回执使用该 USER 当前 attempt_id/状态和真实关联回答编号，错误关联或未登记 RUNNING 不伪装正常。
+4. 新消息遇到占用报 SESSION_BUSY；数据库存在无本地登记的 RUNNING 则报 MESSAGE_SEND_UNAVAILABLE，等待后续恢复，不覆盖旧记录。
+5. 用后端 input_policy 组装输入并检查预算，再执行必填的 check_new_message 检查，然后生成 attempt_id、占用会话、保存一条 USER/RUNNING。预算检查使用下节的真实业务代码；check_new_message 留给尚未实现的按用户限流，测试仅注入替身，生产接口不能注入空检查。这些步骤不允许网络或模型调用。
+6. 首条 USER 且标题未手动修改时，用正文去首尾空白、换行替换为空格后的前 30 字符初始化标题；其他情况不覆盖标题。同一事务更新会话 updated_at 和 last_activity_at。提交成功后才交出 AcceptedMessage（会话/问题/执行编号，以及 prepared_input 输入快照），它是内部执行凭据，不新增 API 响应字段。
+
+### 使用和退出：明确执行所有权
+
+with 的主体位于数据库事务和短锁之外，将来在这里执行并结算 Agent；当前只由测试模拟。不能把任务丢到后台后直接离开作用域，也不能在 async 事件循环中直接运行同步数据库/锁操作。真实异步取消、SSE 生命周期及执行器适配还没接入。
+
+正常离开或主体抛异常时，只处理本次拥有的 attempt_id：如果仍 RUNNING，保存 FAILED/GENERATION_INTERRUPTED；若已成功且回答存在，或已失败，则保留最终结果。确认提交后释放占用。重复回执退出不清理原任务；迟到的旧作用域不能释放新编号或改写新任务。
+
+INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查询本次键与编号。确认无记录才释放；已落库且未完成则标为中断，避免“提交成功但返回失败”留下无人执行的 RUNNING。核对/结算本身失败时保留占用并报 MESSAGE_SEND_UNAVAILABLE，不谎称空闲。当前没有数据库恢复后自动核对入口或启动清理；上线前必须补齐。即使异常后核对发现已提交，也不会自动执行模型。
+
+### 测试与边界
+
+新增 12 项离线测试、14 组隔离 MySQL 测试：保存/标题/活动时间、同键并发只存一次、忙碌时重复回执、正文冲突、拒绝不占新键、跨会话键隔离、越权拒绝、手动标题保留、作用域异常清理、已成功回复不覆盖、提交前回滚、提交后异常核对、清理失败保留占用及旧清理不能影响新执行。累计 225 项离线、70 组真实数据库测试通过；测试容器/数据已清理。
+
+这一阶段没有 HTTP、SSE、真实模型调用、限流、失败重试或后台任务。输入组装与准入预算现已补上，详见下一节。测试中的成功回复直接写入临时库，不表示正式 ASSISTANT 保存业务已实现。不修改项目数据库或表结构，不提交/推送 Git。
+
+## 发送第二步：组装 Agent 输入
+
+2026-09-26 新增，简单说就是：**把 AI 回答前需要看的材料备齐，再判断放不放得下。这里还没有让 AI 开始回答。**
+
+| 位置 | 职责 |
+|---|---|
+| `app/agent/input_policy.py` | 后端模型容量、应用预算、输出/工具等预留，以及明确标为估算的计数函数 |
+| `app/services/agent_input.py` | 验证会话归属，读取当前用户记忆、挑选本会话成功问答，形成不可变输入快照 |
+| `app/services/message_submission.py` | 保存新问题前调用上述组装；提交成功后把同一份快照交给未来执行器 |
+
+### 输入是怎样整理的
+
+1. 在消息准入的同一事务内确认会话属于当前用户。不接受前端指定别人的用户编号。
+2. 从 `agent_memory` 按当前用户读取，整理成 `/memories/profile.md` 对应的文本快照；不创建磁盘文件，不保存第二份 Profile。正文是用户数据，不是系统指令，不能授权访问别人的数据。
+3. 先计算系统提示、工具定义、完整当前问题和记忆的估算占用。必要内容已超预算则抛 `ContextTooLargeError`（未来 HTTP 层映射 `422 CONTEXT_TOO_LARGE`）；不保存 USER、不占用 key、不改标题或活动时间。
+4. 从本会话最近的成功 USER 问题查找对应 ASSISTANT，逐轮加入预算。失败问题不入选；成功状态却缺少正确关联回答时报安全错误，不偷偷当作正常历史。
+5. 下一整轮放不下就停止，不拆开问答、不跳过较近的大轮次。查询每批最多 50 轮，但可以继续读下一批，**50 不是总轮数限制，更没有 20 轮上限**。
+6. 把选中的问答按旧到新排列，末尾完整加入当前问题一次。快照保留来源消息编号、选中轮数、是否因预算停止和估算方式，方便测试。未选中历史仍保留在数据库和页面。
+
+`PreparedAgentInput.as_agent_messages()` 只转换为 LangChain 的 HumanMessage/AIMessage 列表，每次产生新对象；不会调用模型。系统提示在 `policy.system_prompt`，记忆在 `profile_memory`，不重复塞进聊天列表。新 USER 保存后不重新组装另一份上下文，因此不会再次把当前问题追加进去。重复请求只返回原回执，不重新读记忆或计算新预算。
+
+### 当前预算及明确限制
+
+本地配置型号是 `deepseek-v4-pro`。[DeepSeek 官方模型元数据文档](https://api-docs.deepseek.com/api/list-models/)于 2026-09-26 核对：上下文 1,048,576，最大输出 393,216 tokens。代码仅登记这个已核对型号，换型号必须新增经过确认的配置，不猜测容量；这些是静态配置，不会自动随供应商变化。
+
+为了控制第一版成本，应用层默认总预算为 65,536，小于供应商上限；其中预留输出 4,096、Deep Agents 框架提示/包装 8,192、后续工具结果 4,096、安全余量 4,096，剩下 45,056 用于当前问题、记忆、已知系统提示/工具和成功历史。可通过后端 `AgentInputPolicy` 显式调整，不能由前端任意指定；不会修改你的 `.env` 或模型配置。
+
+计数采用 **UTF-8 字节数 + 消息/外层开销的保守估算**，不是字符数，也不是 DeepSeek tokenizer 的精确结果或计费数字。中文、英文和 emoji 占用不同。它可能比实际 token 数大，从而更早舍弃旧历史；不是对供应商最终编码的数学保证。
+
+本次未创建正式 Deep Agent，当前正式工具清单为空；框架预留不是已经测量过的默认工具开销。未来执行器必须使用同一个型号、输出上限和快照，把 `profile_memory` 接到只读用户记忆后端；传入实际工具定义、核对框架最终提示，并在每次真实模型调用前重新检查完整请求（含工具结果）。**不能仅凭本次通过预算检查，就宣称完整 Deep Agents 请求一定不超窗。** 不得把所有默认文件工具/子 Agent 直接暴露给用户，也不启用未经确认的自动历史摘要。
+
+当前函数用于新消息，失败重试仍未实现；未来重试必须复用预算规则，但从原 USER 取问题并排除该问题自身，不能把重试伪装成一条新问题。本次也没有实现记忆写入工具、SSE、最终回复保存、执行期预算中间件或限流。
+
+### 验证
+
+新增 19 项离线测试、8 组真实 MySQL 测试。验证 60 轮成功问答无固定轮数限制、相同时间戳跨批排序、逐整轮截取、当前问题原文只出现一次、失败问题排除、用户/会话隔离、记忆快照不被后续更新改变、超预算不落库且同 key 可再次提交、重复请求不重新预算及错误脱敏。
+
+全量 244 项离线测试、78 组隔离 MySQL 8.4.11 测试及迁移回退再升级通过。只使用一次性测试库，测试容器和数据已清理；没有调用真实模型、消耗 API 余额或修改项目数据库。
 
 ## Deep Agents 最小真实调用（阶段 0）
 
@@ -389,4 +597,4 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 uv run python -m unittest discover -s tests -v
 ```
 
-这个测试不需要先启动服务，也不依赖数据库或模型。此前只有临时内存内测试；现在已新增实际应用入口和测试文件，但业务功能仍未实现。
+这个健康接口测试不需要先启动服务，也不依赖数据库或模型。现已有注册和登录服务函数，但业务 HTTP 接口仍未接入，不能把 /health 可用等同于网站可注册登录。

@@ -22,6 +22,14 @@ from app.db.engine import build_database_engine
 from app.db.base import Base
 from app.models import AgentMemory, AuthSession, ChatSession, Message, User
 from app.models.agent_memory import MEMORY_TOPIC_TYPES
+from registration_mysql_cases import RegistrationMySQLTest
+from login_mysql_cases import LoginMySQLTest
+from authentication_mysql_cases import AuthenticationMySQLTest
+from logout_mysql_cases import LogoutMySQLTest
+from chat_session_mysql_cases import ChatSessionMySQLTest
+from message_history_mysql_cases import MessageHistoryMySQLTest
+from message_submission_mysql_cases import MessageSubmissionMySQLTest
+from agent_input_mysql_cases import AgentInputMySQLTest
 
 
 def docker(*args, env=None):
@@ -283,7 +291,23 @@ def main():
         migrate("current")
         migrate("check")
         MySQLMigrationTest.engine = engine
+        RegistrationMySQLTest.engine = engine
+        LoginMySQLTest.engine = engine
+        AuthenticationMySQLTest.engine = engine
+        LogoutMySQLTest.engine = engine
+        ChatSessionMySQLTest.engine = engine
+        MessageHistoryMySQLTest.engine = engine
+        MessageSubmissionMySQLTest.engine = engine
+        AgentInputMySQLTest.engine = engine
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(MySQLMigrationTest)
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(RegistrationMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(LoginMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(AuthenticationMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(LogoutMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ChatSessionMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MessageHistoryMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MessageSubmissionMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(AgentInputMySQLTest))
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         if not result.wasSuccessful():
             return 1

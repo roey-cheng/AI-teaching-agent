@@ -2,9 +2,9 @@
 
 **创建日期：** 2026-09-20
 
-**更新日期：** 2026-09-25
+**更新日期：** 2026-09-26
 
-**状态：** 当前实现依据；请求/响应数据 Schema 已编写并通过离线测试，业务逻辑、接口接入和端到端验收尚未完成。
+**状态：** 当前实现依据；已有 Schema、账号、会话、历史和消息准入/USER 保存业务的离线及隔离 MySQL 验证。真实输入预算/限流、生成执行、重试、启动/故障恢复、HTTP/SSE 和网页验收尚未完成。
 
 **API 前缀：** /api/v1
 
@@ -128,7 +128,9 @@
 
 注册成功不自动登录，前端引导用户登录。密码在后端进行专用密码哈希处理；不返回或记录密码及其哈希。公开注册不能设置管理员角色。
 
-主要错误：`409 EMAIL_ALREADY_REGISTERED`、`422 VALIDATION_ERROR`。
+主要错误：`409 EMAIL_ALREADY_REGISTERED`、`422 VALIDATION_ERROR`；数据库或密码哈希服务异常使用 `503 REGISTRATION_UNAVAILABLE` 的安全提示。提交期间断线可能无法确认账号是否创建，不自动重试写入，需先核对账号状态。
+
+注册服务已实现于 `backend/app/services/auth.py`，实际 HTTP 状态和错误外壳转换仍待接口层接入。密码采用 argon2-cffi 的 Argon2id 与随机盐；读取查重结束后再哈希，短写事务内保存用户。并发重复注册依靠邮箱唯一约束兜底，注册成功不创建登录记录。
 
 ### 4.2 登录
 
@@ -157,11 +159,15 @@
 
 后端验证密码与账号状态，成功后创建或轮换当前登录凭据。不存在的账号、错误密码或不可登录账号统一返回 `401 INVALID_CREDENTIALS`，不提供密码或内部原因。
 
+登录服务已实现于 `backend/app/services/login.py`：密码验证在数据库事务外，写入前复核账号状态/哈希；同一事务更新登录时间、撤销当前尚未过期/撤销的旧凭据并创建固定 7 天的新记录，不撤销其他设备。数据库只存随机凭据的 SHA-256 哈希。服务内部结果另带 SecretStr 原凭据供未来接口设置 Cookie，不放入上述 JSON；Cookie、HTTP 路由和限流尚未接入。数据库失败预留 `503 LOGIN_UNAVAILABLE`，不暴露内部错误或返回未确认提交的凭据，不自动重试。
+
 ### 4.3 退出登录
 
 **`POST /api/v1/auth/logout`**，无请求体。
 
 服务端撤销当前登录凭据并清除 Cookie，返回 `204 No Content`。凭据不存在或已失效时也返回 `204`。不删除会话、消息和记忆，不自动退出其他设备。
+
+业务函数已实现于 `backend/app/services/logout.py` 的 `logout_user`：无需先通过登录状态检查；缺少或畸形凭据直接成功，否则按凭据哈希执行条件更新，仅撤销当前尚未过期/撤销的记录。未知、过期、已撤销凭据成功无操作，重复退出不覆盖原撤销时间，禁用账号也能退出。数据库失败预留 `503 LOGOUT_UNAVAILABLE`，不伪装成功，不自动重试；提交断线不保证可确认撤销结果。HTTP 路由、204/503 映射、Origin 检查和 Cookie 清除尚未接入。
 
 ### 4.4 当前用户
 
@@ -179,6 +185,8 @@
 
 前端打开或刷新网站时调用。未登录返回 `401 UNAUTHENTICATED`，不返回密码哈希或内部凭据。
 
+业务函数已实现于 `app/services/authentication.py` 的 `get_current_user`：用登录凭据哈希关联 auth_sessions 和 users，校验未撤销、未到期且账号 ACTIVE，再返回 UserResponse。缺少、畸形、未知、过期或撤销凭据以及禁用账号均为 UNAUTHENTICATED；数据库故障使用 AUTHENTICATION_UNAVAILABLE，未来接口映射为 503，不冒充未登录。检查不自动续期、不更新最后登录时间，也不接受前端指定用户。HTTP 路由、Cookie 读取、401/503 映射仍未实现；后续资源操作仍需独立检查数据归属。
+
 ## 5. 会话接口
 
 ### 5.1 新建会话
@@ -188,7 +196,7 @@ POST /api/v1/chat/sessions，要求登录，请求体 {}，成功返回 201：
 ~~~json
 {
   "session_id": "1001",
-  "title": "新对话",
+  "title": "new chat session",
   "created_at": "2026-09-21T08:10:00Z",
   "updated_at": "2026-09-21T08:10:00Z",
   "last_activity_at": "2026-09-21T08:10:00Z"
@@ -196,6 +204,8 @@ POST /api/v1/chat/sessions，要求登录，请求体 {}，成功返回 201：
 ~~~
 
 后端绑定当前用户。首条消息去掉首尾空白、换行转空格，截取前 30 个字符作为标题，不调用模型；手动命名后不再覆盖。每次成功调用创建一个会话；按钮防连击，网络结果不明时先刷新列表，不自动重新创建。
+
+新建业务已实现于 `backend/app/services/chat_sessions.py` 的 `create_chat_session`：调用方传入已验证的当前用户，事务内显式保存标题“new chat session”（用户已修改为英文）、非手动标记和同一 UTC 创建/修改/活动时间，提交后返回 SessionResponse。ORM 和旧迁移的数据库默认值仍为“新对话”，不修改已创建的表。只创建空会话，不生成首条消息标题或调用模型。数据库故障预留 `503 SESSION_UNAVAILABLE`，不自动重试。HTTP 路由、空请求体验证接入、认证接入及前端按钮仍未实现。
 
 ### 5.2 查询左侧会话列表
 
@@ -217,6 +227,8 @@ GET /api/v1/chat/sessions，无查询参数，成功返回 200：
 
 只返回本人全部会话，按 last_activity_at DESC, session_id DESC 排序，即最近活跃的在前。接受新消息、接受重试及成功保存回复时更新活动时间；浏览、改名和失败结算不提升排序。无数据返回 items=[]。
 
+列表业务已实现于 `backend/app/services/chat_sessions.py` 的 `list_chat_sessions`：调用方传入已验证用户，查询时限制所属用户，按活动时间和数据库会话编号倒序取全部记录，返回 SessionListResponse。不读取消息、不修改时间。数据库故障使用 SESSION_UNAVAILABLE，未来接口映射 503，不能返回虚假的空列表。GET 路由、认证接入及拒绝未知查询参数仍待接口层实现。
+
 ### 5.3 重命名
 
 PATCH /api/v1/chat/sessions/{session_id}，要求登录并拥有会话：
@@ -226,6 +238,8 @@ PATCH /api/v1/chat/sessions/{session_id}，要求登录并拥有会话：
 ~~~
 
 title 必填，去首尾空格后 1～100 字符。成功返回 200 和更新后的会话对象，字段同新建响应；记录 title_is_manual=true。生成中允许改名。
+
+重命名业务已实现于 `backend/app/services/chat_sessions.py` 的 `rename_chat_session`：校验编号后，在短事务中按会话编号和当前用户锁定记录，只更新标题、手动标记和 updated_at，不改 last_activity_at。相同标题也设置手动标记。不存在或不属于本人统一 SESSION_NOT_FOUND，数据库故障为 SESSION_UNAVAILABLE，不自动重试；事务提交后才返回 SessionResponse。PATCH 路由、认证、参数和错误的 HTTP 映射尚未接入。
 
 本版不接受 status=ARCHIVED，不实现归档、删除或恢复接口。
 
@@ -285,11 +299,13 @@ GET /api/v1/chat/sessions/{session_id}/messages，无分页参数，要求登录
 
 全部消息按 created_at ASC, message_id ASC 返回，即从旧到新。同一时间用 ID 保证稳定顺序。ASSISTANT 不包含 generation，使用 in_reply_to_message_id 指向问题。
 
-这里的“全部历史”仅指路径中这个会话的全部消息，供页面展示，不包含其他会话的消息。发送或重试时，后端另外组装模型上下文：选取当前会话最近最多 20 轮成功问答，加当前问题和本人 Profile Memory，并根据模型输入预算进一步缩减历史。取消页面分页不等于取消模型的输入长度限制，也不删除未选入上下文的历史记录。
+这里的“全部历史”仅指路径中这个会话的全部消息，供页面展示，不包含其他会话的消息。发送或重试时，后端另外组装模型上下文：先为系统提示、当前问题、本人 Profile Memory、工具及输出等预留 token 预算，再从最近一轮完整成功问答向前选取，下一轮放不下就停止，最终按从旧到新顺序交给模型。不设固定轮数上限，当前问题只完整加入一次。模型窗口、可配置应用 token 预算和实际输入/输出限制共同约束加载量，计数适配规则见内部设计第 3.1 节。未选入的历史仍保留在数据库和页面；当前问题移除历史后仍放不下时，接受前返回 422 CONTEXT_TOO_LARGE，不保存新问题或截断正文。这是已确认设计，预算实现仍待接入。
 
 is_generating 表示本会话是否仍有实际运行。generation 取 USER 自身的最新状态，成功时返回关联的 assistant_message_id；失败时返回简短错误。can_retry 只有在“会话无运行、该问题为整个会话最后一条 USER、最近生成已确认失败”时为 true。查询时保证同一响应的状态一致；写接口仍重新验证。
 
 本接口不调用模型。旧版 latest_generation 和独立尝试历史均不使用；前端用 is_generating 判断忙碌，用每条消息的 generation 显示结果。
+
+只读业务已实现于 `backend/app/services/message_history.py` 的 `get_message_history`。按本人会话检查归属，再读取有序完整消息、匹配回答并计算状态；显式接收共享 GenerationRegistry，在会话短锁内读取数据库和运行登记，不能每次请求创建新的空登记。清理尚未结束即使数据库已是最终状态仍算忙碌。未登记的 RUNNING、登记编号不匹配或问答关系损坏时，抛 MESSAGE_HISTORY_UNAVAILABLE（未来 503），不静默返回空闲或修改数据库。错误摘要使用白名单英文提示，未知代码返回 GENERATION_FAILED，不暴露数据库原始错误文字。启动残留清理、真实任务生命周期、GET 路由和 HTTP 错误映射尚未接入。
 
 ### 6.3 发送并流式回复
 
@@ -314,6 +330,8 @@ client_message_key 是前端生成的 UUID，同一次发送网络重发复用�
 6. 失败时记录 FAILED 和简短原因，连接仍可用则发送 message_error，完成清理后释放本次占用。
 
 被拒绝的新请求不留下 USER 或占用新消息键。模型生成期间不持有数据库事务。保存时仍核对 attempt_id 与 RUNNING 状态，旧执行不能覆盖新一次重试。
+
+第一步内部业务已实现于 `backend/app/services/message_submission.py` 的 `accept_user_message`：以 with 管理新执行的所有权，先检查归属和重复键，再检查忙碌、调用必填的新消息准入检查、保存 USER/RUNNING 并更新标题/活动时间。新接受返回内部 AcceptedMessage，重复返回已有 DuplicateMessageResponse；不是新增公开响应格式。作用域退出时把本次仍未完成的记录结算为 GENERATION_INTERRUPTED，已确认最终状态不覆盖，重复回执不清理原任务。数据库失败预留 503 MESSAGE_SEND_UNAVAILABLE；提交结果不明时独立核对，不自动再次 INSERT 或调用模型，核对失败保留占用。真实预算/限流只留检查入口（测试使用替身），执行器、异步取消、SSE、故障后自动核对和启动清理尚未接入，不能把此阶段当作可用的聊天接口。
 
 ### 6.4 重试最后一个失败问题
 
