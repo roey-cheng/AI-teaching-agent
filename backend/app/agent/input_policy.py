@@ -20,7 +20,7 @@ class AgentInputPolicy:
     model_context_tokens: int
     model_max_output_tokens: int
     app_context_tokens: int = 65_536
-    output_tokens: int = 4_096
+    output_tokens: int = 4_096  # 正式聊天中由模型可见推理与最终正文共同使用。
     framework_reserve_tokens: int = 8_192
     tool_result_reserve_tokens: int = 4_096
     safety_tokens: int = 4_096

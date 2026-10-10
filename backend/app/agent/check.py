@@ -7,12 +7,12 @@ from deepagents import create_deep_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, wrap_model_call
 from langchain_core.messages import AIMessageChunk
 from langchain_deepseek import ChatDeepSeek
-from langsmith import tracing_context
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
 
-from app.core.config import ModelSettings, load_model_settings
+from app.agent.tracing import agent_tracing
+from app.core.config import ModelSettings, load_model_settings, load_tracing_settings
 
 QUESTION = "What is an API? Explain in two sentences in English. Do not use tools."
 
@@ -86,15 +86,17 @@ async def stream_answer(agent) -> int:
 async def main() -> int:
     try:
         settings = load_model_settings()
+        tracing_settings = load_tracing_settings()
     except (ValidationError, SettingsError, OSError):
-        print("Invalid model configuration: check MODEL_* in backend/.env; the API key must have no whitespace and the URL must be an official DeepSeek endpoint.")
+        print("Invalid model or tracing configuration: check MODEL_* and LANGSMITH_* in backend/.env. Do not share API keys.")
         return 1
 
     print("Starting the minimal Deep Agents check (one model call; no database reads or writes).")
     print(f"Question: {QUESTION}\nAnswer: ", end="", flush=True)
     try:
-        # 不向 LangSmith 上传这次运行记录。总等待不超过 60 秒。
-        with tracing_context(enabled=False):
+        # LangSmith 接入点：开关包住整个流的消费，模型和图节点才会出现在 trace 中。
+        # 开启会上传执行内容；默认关闭。Agent 总等待不超过 60 秒。
+        with agent_tracing(tracing_settings):
             async with asyncio.timeout(60):
                 count = await stream_answer(build_probe_agent(settings))
     except AuthenticationError:
@@ -117,6 +119,8 @@ async def main() -> int:
     if count < 2:
         print("Only one text chunk was received; multiple incremental chunks have not yet been observed.")
     print("This is a terminal-only test; web chat, SSE endpoints, and long-term memory are not integrated yet.")
+    if tracing_settings.tracing:
+        print("LangSmith tracing was enabled. Check the configured LangSmith project; upload success is not verified here.")
     return 0
 
 

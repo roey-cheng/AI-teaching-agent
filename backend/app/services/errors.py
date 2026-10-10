@@ -107,3 +107,18 @@ class AgentInputUnavailableError(Exception):
 
     def __init__(self) -> None:
         super().__init__("Agent input could not be prepared. Please try again later.")
+
+
+class GenerationRateLimitError(Exception):
+    code = "RATE_LIMITED"
+
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("Too many new generations. Please wait before sending another message.")
+
+
+class MemoryUnavailableError(Exception):
+    code = "MEMORY_UNAVAILABLE"
+
+    def __init__(self):
+        super().__init__("Memory operation could not be confirmed. Please refresh before trying again.")

@@ -10,6 +10,7 @@ dependencies = [
     "deepagents>=0.7.15,<0.8",
     "fastapi>=0.141.1,<0.142",
     "langchain-deepseek>=1,<2",
+    "langsmith>=0.13,<0.14",
     "pydantic-settings>=2.15.0,<3",
     "pydantic[email]>=2.13.5,<3",
     "pymysql[rsa]>=1.2.3",

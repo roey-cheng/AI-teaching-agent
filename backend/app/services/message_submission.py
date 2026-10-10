@@ -97,7 +97,8 @@ def accept_user_message(
     input_policy 为后端配置，输入组装和预算检查在 USER 保存前完成。
     check_new_message 仍为必填的本地、快速准入检查（未来限流）；目前只注入测试替身。
     两者均不能调用模型/网络；生产接口不能把未实现的限流伪装成空检查。
-    同步数据库与锁不能直接阻塞异步事件循环；本函数尚未接异步/SSE 生命周期。
+    同步数据库与锁不能直接阻塞异步事件循环；chat_execution 在线程中进入/退出本作用域。
+    HTTP/SSE 生命周期尚未接入。
     """
     chat_id = int(format_database_id(session_id, "Session ID"))
     user_id = int(current_user.user_id)

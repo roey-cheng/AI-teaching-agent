@@ -21,6 +21,8 @@ from app.schemas.message import (
     UserMessageResponse,
 )
 from app.schemas.stream import (
+    AgentProgressData,
+    ReasoningDeltaData,
     MessageDeltaData,
     MessageDoneData,
     MessageErrorData,
@@ -30,6 +32,8 @@ from app.schemas.stream import (
 from app.schemas.user import UserResponse
 
 __all__ = [
+    "AgentProgressData",
+    "ReasoningDeltaData",
     "AssistantMessageResponse",
     "CreateSessionRequest",
     "DuplicateMessageResponse",
