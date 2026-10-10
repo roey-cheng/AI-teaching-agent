@@ -50,11 +50,30 @@ class GenerationRegistry:
     def __init__(self):
         self._entries: dict[int, _Entry] = {}
         self._index_lock = Lock()
+        self._cleaning = False
+
+    @contextmanager
+    def startup_cleanup(self) -> Iterator[None]:
+        """只在启动时使用：拒绝已有执行/等待者，并阻止清理期间新准入。
+
+        本地空登记不证明其他进程已退出；调用方还必须持有整个运行期间的进程锁。
+        """
+        with self._index_lock:
+            if self._cleaning or self._entries:
+                raise RuntimeError("Startup cleanup requires an idle generation registry.")
+            self._cleaning = True
+        try:
+            yield
+        finally:
+            with self._index_lock:
+                self._cleaning = False
 
     @contextmanager
     def locked(self, session_id: int) -> Iterator[_RunSlot]:
         session_id = int(format_database_id(session_id, "Session ID"))
         with self._index_lock:
+            if self._cleaning:
+                raise RuntimeError("Generation access is unavailable during startup cleanup.")
             entry = self._entries.setdefault(session_id, _Entry())
             entry.users += 1
         try:

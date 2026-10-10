@@ -1,8 +1,9 @@
-"""一次新消息的异步执行器；内部后端入口，不是 HTTP 接口，也不实现失败重试。"""
+"""新发送和失败重试共用的异步执行器；内部后端入口，不是 HTTP/SSE 路由。"""
 
 import asyncio
 import math
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from uuid import uuid4
 
 from openai import APITimeoutError
@@ -10,17 +11,20 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.factory import build_chat_agent
 from app.agent.input_policy import AgentInputPolicy
+from app.agent.memory_workflow import prepare_memory_for_turn
 from app.agent.output import extract_visible_chunk, managed_agent_stream
 from app.agent.tracing import async_agent_tracing
 from app.core.async_work import complete_in_thread
 from app.core.config import ModelSettings, TracingSettings
 from app.schemas import (
     AgentProgressData, DuplicateMessageResponse, MessageDeltaData, MessageDoneData,
-    MessageErrorData, MessageStartData, ReasoningDeltaData, SendMessageRequest, StreamError, UserResponse,
+    MessageErrorData, MessageStartData, ReasoningDeltaData, RetryMessageRequest,
+    SendMessageRequest, StreamError, UserResponse,
 )
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import settle_generation
-from app.services.message_submission import accept_user_message
+from app.services.message_retry import accept_failed_message_retry
+from app.services.message_submission import AcceptedMessage, accept_user_message
 
 ChatEvent = (MessageStartData | AgentProgressData | ReasoningDeltaData | MessageDeltaData
              | MessageDoneData | MessageErrorData)
@@ -46,6 +50,44 @@ async def execute_chat_turn(
     不采用调用方可能遗弃的裸 async generator，不脱离请求偷偷继续生成。
     准入/结算错误向外抛安全业务异常；已接收的模型失败返回 message_error。
     """
+    scope = accept_user_message(current_user, session_id, request, session_factory, registry,
+                                check_new_message=check_new_message, input_policy=input_policy)
+    return await _execute_with_scope(
+        scope, session_factory, registry, model_settings=model_settings, tracing_settings=tracing_settings,
+        input_policy=input_policy, on_event=on_event, timeout_seconds=timeout_seconds,
+    )
+
+
+async def execute_chat_retry(
+    current_user: UserResponse, session_id: str, message_id: str, request: RetryMessageRequest,
+    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
+    model_settings: ModelSettings, tracing_settings: TracingSettings,
+    input_policy: AgentInputPolicy, check_retry: Callable[[RetryMessageRequest], None],
+    on_event: Callable[[ChatEvent], Awaitable[None]], timeout_seconds: float = 120,
+) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
+    """重试原问题；不是发送同样文字的新消息，也不是重新生成成功答案。
+
+    身份须已验证；check_retry 应使用与新发送同一份每用户限流器。
+    调用方取消时等待模型/提交清理，不在后台脱离作用域继续执行。
+    """
+    scope = accept_failed_message_retry(
+        current_user, session_id, message_id, request, session_factory, registry,
+        check_retry=check_retry, input_policy=input_policy,
+    )
+    return await _execute_with_scope(
+        scope, session_factory, registry, model_settings=model_settings, tracing_settings=tracing_settings,
+        input_policy=input_policy, on_event=on_event, timeout_seconds=timeout_seconds,
+    )
+
+
+async def _execute_with_scope(
+    scope: AbstractContextManager[AcceptedMessage | DuplicateMessageResponse],
+    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
+    model_settings: ModelSettings, tracing_settings: TracingSettings,
+    input_policy: AgentInputPolicy, on_event: Callable[[ChatEvent], Awaitable[None]],
+    timeout_seconds: float,
+) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
+    """两种准入之后走同一条记忆→回答→保存→清理路径，避免维护两套生成逻辑。"""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("Generation timeout must be positive and finite")
     if model_settings.name != input_policy.model_name:
@@ -58,8 +100,6 @@ async def execute_chat_turn(
             raise EventDeliveryError() from None
 
     # __enter__ 在线程中执行。即使取消发生在提交期间，也保留清理所需的进入结果。
-    scope = accept_user_message(current_user, session_id, request, session_factory, registry,
-                                check_new_message=check_new_message, input_policy=input_policy)
     entered = False
 
     def enter():
@@ -86,10 +126,13 @@ async def execute_chat_turn(
                 seen_reasoning = seen_answer = False
                 output_bytes = 0
                 async with async_agent_tracing(tracing_settings):
-                    agent = build_chat_agent(model_settings, accepted.prepared_input)
+                    prepared = await prepare_memory_for_turn(
+                        accepted, session_factory, registry, model_settings, progress,
+                    )
+                    agent = build_chat_agent(model_settings, prepared)
                     await progress("agent_running")
                     stream = agent.astream(
-                        {"messages": accepted.prepared_input.as_agent_messages()},
+                        {"messages": prepared.as_agent_messages()},
                         config={"run_name": "teaching_chat", "metadata": {"attempt_id": accepted.attempt_id}},
                         stream_mode="messages", subgraphs=False,
                     )

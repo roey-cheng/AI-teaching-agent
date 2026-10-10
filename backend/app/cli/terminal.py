@@ -40,6 +40,11 @@ class EventPrinter:
         "thinking": "Receiving model reasoning.",
         "answering": "Receiving the answer.",
         "saving": "Saving the complete answer.",
+        "memory_checking": "Checking for eligible long-term preferences or facts.",
+        "memory_saving": "Saving profile memory.",
+        "memory_saved": "Profile memory save confirmed.",
+        "memory_skipped": "No new profile memory was saved.",
+        "memory_unavailable": "Profile memory update could not be confirmed; continuing the answer.",
     }
 
     def __init__(self, terminal: Terminal):

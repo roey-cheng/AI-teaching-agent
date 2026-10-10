@@ -4,7 +4,7 @@
 
 **更新日期：** 2026-10-11
 
-**状态：** 当前实现依据；已有 Schema、账号、会话、历史、消息准入/USER 保存、输入组装、正式 Agent 和只读记忆。2026-10-11 增加新消息异步执行器、思考/进度事件、完整回复保存、超时取消、终端入口和单进程生成限流；随后补充记忆保存/查询服务，验证详情见后端 README。Agent 记忆提取/写入工具、重试、启动/故障恢复、HTTP/SSE 和网页验收尚未完成。
+**状态：** 当前实现依据；已有 Schema、账号、会话、历史、消息准入、输入组装、正式 Agent、异步执行器、思考/进度事件、结果保存、超时取消、终端入口和单进程生成限流。已接记忆存取服务、独立 Agent 记忆阶段及 `/memory`，失败重试业务已复用原问题并接共享执行器，启动残留清理及同项目进程锁已接终端/FastAPI，验证详情见后端 README。终端重试命令、运行中故障自动恢复、业务 HTTP/SSE 和网页验收尚未完成；真实模型记忆质量仍待手动联调。
 
 **API 前缀：** /api/v1
 
@@ -299,13 +299,13 @@ GET /api/v1/chat/sessions/{session_id}/messages，无分页参数，要求登录
 
 全部消息按 created_at ASC, message_id ASC 返回，即从旧到新。同一时间用 ID 保证稳定顺序。ASSISTANT 不包含 generation，使用 in_reply_to_message_id 指向问题。
 
-这里的“全部历史”仅指路径中这个会话的全部消息，供页面展示，不包含其他会话的消息。发送或重试时，后端另外组装模型上下文：先为系统提示、当前问题、本人 Profile Memory、工具及输出等预留 token 预算，再从最近一轮完整成功问答向前选取，下一轮放不下就停止，最终按从旧到新顺序交给模型。不设固定轮数上限，当前问题只完整加入一次。模型窗口、可配置应用 token 预算和实际输入/输出限制共同约束加载量，计数适配规则见内部设计第 3.1 节。未选入的历史仍保留在数据库和页面；当前问题移除历史后仍放不下时，接受前返回 422 CONTEXT_TOO_LARGE，不保存新问题或截断正文。新消息输入组装与预算估算已有实现；HTTP 映射及失败重试业务尚未接入。
+这里的“全部历史”仅指路径中这个会话的全部消息，供页面展示，不包含其他会话的消息。发送或重试时，后端另外组装模型上下文：先为系统提示、当前问题、本人 Profile Memory、工具及输出等预留 token 预算，再从最近一轮完整成功问答向前选取，下一轮放不下就停止，最终按从旧到新顺序交给模型。不设固定轮数上限，当前问题只完整加入一次。模型窗口、可配置应用 token 预算和实际输入/输出限制共同约束加载量，计数适配规则见内部设计第 3.1 节。未选入的历史仍保留在数据库和页面；当前问题移除历史后仍放不下时，接受前返回 422 CONTEXT_TOO_LARGE，不保存新问题或截断正文。新发送和失败重试已共用输入组装与预算估算；重试预算拒绝保持原失败记录不变，HTTP 映射尚未接入。
 
 is_generating 表示本会话是否仍有实际运行。generation 取 USER 自身的最新状态，成功时返回关联的 assistant_message_id；失败时返回简短错误。can_retry 只有在“会话无运行、该问题为整个会话最后一条 USER、最近生成已确认失败”时为 true。查询时保证同一响应的状态一致；写接口仍重新验证。
 
 本接口不调用模型。旧版 latest_generation 和独立尝试历史均不使用；前端用 is_generating 判断忙碌，用每条消息的 generation 显示结果。
 
-只读业务已实现于 `backend/app/services/message_history.py` 的 `get_message_history`。按本人会话检查归属，再读取有序完整消息、匹配回答并计算状态；显式接收共享 GenerationRegistry，在会话短锁内读取数据库和运行登记，不能每次请求创建新的空登记。清理尚未结束即使数据库已是最终状态仍算忙碌。未登记的 RUNNING、登记编号不匹配或问答关系损坏时，抛 MESSAGE_HISTORY_UNAVAILABLE（未来 503），不静默返回空闲或修改数据库。错误摘要使用白名单英文提示，未知代码返回 GENERATION_FAILED，不暴露数据库原始错误文字。启动残留清理、真实任务生命周期、GET 路由和 HTTP 错误映射尚未接入。
+只读业务已实现于 `backend/app/services/message_history.py` 的 `get_message_history`。按本人会话检查归属，再读取有序完整消息、匹配回答并计算状态；显式接收共享 GenerationRegistry，在会话短锁内读取数据库和运行登记，不能每次请求创建新的空登记。清理尚未结束即使数据库已是最终状态仍算忙碌。未登记的 RUNNING、登记编号不匹配或问答关系损坏时，抛 MESSAGE_HISTORY_UNAVAILABLE（未来 503），不静默返回空闲或修改数据库。错误摘要使用白名单英文提示，未知代码返回 GENERATION_FAILED，不暴露数据库原始错误文字。真实任务生命周期和启动残留清理已接入；GET 路由和 HTTP 错误映射尚未接入。
 
 ### 6.3 发送并流式回复
 
@@ -331,7 +331,7 @@ client_message_key 是前端生成的 UUID，同一次发送网络重发复用�
 
 被拒绝的新请求不留下 USER 或占用新消息键。模型生成期间不持有数据库事务。保存时仍核对 attempt_id 与 RUNNING 状态，旧执行不能覆盖新一次重试。
 
-消息准入已实现于 `backend/app/services/message_submission.py` 的 `accept_user_message`：以 with 管理执行所有权，检查归属、重复键、忙碌、输入预算及必填限流检查，保存 USER/RUNNING 并更新标题/活动时间。新接受返回 AcceptedMessage（含输入快照），重复返回 DuplicateMessageResponse，不新增公开响应格式。2026-10-11 的 `chat_execution.execute_chat_turn` 已在该作用域内串起正式 Agent、异步流、思考/进度事件、超时取消与最终保存。退出时核对状态并匹配释放占用，不覆盖最终状态，不盲目重发 INSERT 或调用模型；核对失败保留占用。真实限流、HTTP/SSE、故障后自动核对和启动清理仍待实现，不能把内部业务可运行当作已有公开聊天接口。
+消息准入已实现于 `backend/app/services/message_submission.py` 的 `accept_user_message`：以 with 管理执行所有权，检查归属、重复键、忙碌、输入预算及必填限流检查，保存 USER/RUNNING 并更新标题/活动时间。新接受返回 AcceptedMessage（含输入快照），重复返回 DuplicateMessageResponse，不新增公开响应格式。2026-10-11 的 `chat_execution.execute_chat_turn` 已在该作用域内串起正式 Agent、异步流、思考/进度事件、超时取消与最终保存。退出时核对状态并匹配释放占用，不覆盖最终状态，不盲目重发 INSERT 或调用模型；核对失败保留占用。单进程生成限流和启动清理已实现；HTTP/SSE、账号/IP 限流及运行中故障自动核对仍待实现，不能把内部业务可运行当作已有公开聊天接口。
 
 ### 6.4 重试最后一个失败问题
 
@@ -362,7 +362,13 @@ failed_attempt_id 必填 UUID，取自历史接口中该问题的 generation.att
 
 数据库保留同一 USER 最多一条成功回复的唯一约束。重试改变的是该问题的最新生成元数据，不修改问题正文。返回事件格式与接口 9 一致。
 
+**业务实现状态（2026-10-11）：** `backend/app/services/message_retry.py` 的 `accept_failed_message_retry` 已实现上述准入和一跳重复回执；`chat_execution.execute_chat_retry` 与新发送共用两阶段 Agent、思考/进度事件、超时、保存和清理。原问题只进入模型输入一次；重试 UPDATE 提交异常时独立核对，确认回滚则保留旧失败，确认新尝试已提交且未完成则标为中断，核对失败保留占用。新发送和重试的调用方必须使用同一份每用户生成限流器。不新增表或迁移；HTTP/SSE 路由、终端命令及网页按钮尚未接入。
+
+访问不到会话仍使用 `404 SESSION_NOT_FOUND`；在本人会话中找不到目标消息使用 `404 MESSAGE_NOT_FOUND`；传入 ASSISTANT 消息使用 `409 RETRY_NOT_ALLOWED`。数据库核对失败沿用 `503 MESSAGE_SEND_UNAVAILABLE`。这些 HTTP 映射是接口约定，当前业务层只抛安全异常；RUNNING 与本地登记不一致不能伪装正常回执，需先完成启动/故障清理。
+
 ### 6.5 简单超时、断线与重启
+
+**启动实现状态（2026-10-11）：** `startup_cleanup.reconcile_interrupted_generations` 已由终端确认后的入口和 FastAPI lifespan 调用，不增加公开接口。启动先取得 macOS/Linux 的同项目进程锁，再检查 MySQL/迁移，并在空闲登记屏障下以同一事务核对残留 RUNNING：有效最终回复已存在则恢复 SUCCEEDED，否则标记 FAILED / GENERATION_INTERRUPTED；异常关联、数据库失败或提交未确认则停止启动。清理不调用模型，不删除历史或改动原执行编号、创建时间、会话排序、登录和记忆。进程锁覆盖整个运行期间，只保护同主机同目录入口；首次使用必须停止未接锁的旧程序，禁止其他目录或其他机器同时操作同一聊天库。FastAPI 现在启动就依赖数据库，`/health` 本身仍只检查 HTTP 存活，不代表数据库持续可用。
 
 - 默认 120 秒是一次 Agent 执行的请求级超时，配置在后端；不建立 180 秒持久化 deadline、扫描器、队列或任务领取流程。
 - 超时取消本次异步调用，已确认未完成时记录 FAILED / GENERATION_TIMEOUT。停止接收本次后续片段；数据库保存仍验证当前编号与状态。
@@ -389,7 +395,7 @@ failed_attempt_id 必填 UUID，取自历史接口中该问题的 generation.att
 
 2026-10-11：后端执行器已产生上述结构化事件，但尚未通过 HTTP 发送 SSE。`on_event` 由未来接口层实现；重复请求直接返回 JSON 回执，不产生新的事件流。思考与进度不增加公开接口数量，仍是 11 个业务接口。
 
-`stage` 仅允许：`context_ready`（本会话历史与本用户记忆快照准备完毕）、`agent_running`（即将消费 Agent 流）、`thinking`（开始收到 API 推理文字）、`answering`（开始收到回答正文）、`saving`（完整生成结束，开始保存）。`thinking`、`answering` 各在首个对应片段时发送一次；没有推理片段就不虚构思考内容。完成/失败由终止事件表示，不提前发送“已保存”。
+`stage` 允许：`context_ready`（历史与记忆快照准备完毕）、`memory_checking`（判断是否需更新记忆）、`memory_saving`（准备提交记忆）、`memory_saved`（记忆提交已确认）、`memory_skipped`（无新记忆保存）、`memory_unavailable`（无法确认记忆更新，继续回答）、`agent_running`（即将消费回答 Agent 流）、`thinking`（开始收到 API 推理文字）、`answering`（开始收到回答正文）、`saving`（完整生成结束，开始保存回答）。记忆阶段内部输出不作为 reasoning_delta/message_delta 展示。`thinking`、`answering` 各在首个对应片段时发送一次；没有推理片段就不虚构思考内容。记忆已保存不代表回答已完成；回答完成/失败仍由终止事件表示。
 
 思考文字仅当次展示，不进入 `messages.content`、不进入下轮历史，也不新增数据库列；刷新后不恢复。未来前端用单独的可折叠区域展示，按 `attempt_id` 隔离。所有这些文字都按不可信文本处理，不能直接注入 HTML。当前只允许主模型白名单文字字段，工具参数、通用图状态及记忆快照不直接转发。模型生成的推理可能复述输入中的个人信息，因此不是额外的隐私隔离机制；只应交给通过认证的会话所有者。
 
@@ -438,7 +444,7 @@ data: {"attempt_id":"30dfe922-1183-4dfb-9ce7-ea940d619195","error":{"code":"MODE
 
 ## 9. Profile Memory
 
-实现进度：查询 Schema 与内部查询/保存业务已完成，HTTP 路由、Agent 记忆提取和写入工具尚未接入。本节仍描述完整目标，不表示聊天已经能自动形成新记忆。
+实现进度：查询 Schema、内部查询/保存业务、独立 Agent 记忆阶段与终端 `/memory` 已接入，HTTP 路由和网页尚未完成。记忆阶段最多一次非思考模型判断和一次写入，然后使用原思考模型回答；真实模型的提取质量与云端 tracing 仍需手动验证。来源引用校验和敏感模式拦截不是完备的语义隐私保证。
 
 GET /api/v1/me/memory，要求登录，返回本人实际保存的摘要：
 

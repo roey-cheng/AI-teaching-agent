@@ -50,7 +50,8 @@ class AgentProgressData(_EventData):
 
     event_name: ClassVar[str] = "agent_progress"
     attempt_id: UUIDString
-    stage: Literal["context_ready", "agent_running", "thinking", "answering", "saving"]
+    stage: Literal["context_ready", "agent_running", "thinking", "answering", "saving",
+                   "memory_checking", "memory_saving", "memory_saved", "memory_skipped", "memory_unavailable"]
 
 
 class StreamError(GenerationError):

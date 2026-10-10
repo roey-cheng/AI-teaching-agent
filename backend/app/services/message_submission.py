@@ -55,9 +55,14 @@ def _answer_id(session: Session, question: Message) -> int | None:
 
 def _settle_interrupted(
     user_id: int, chat_id: int, client_key: str, attempt_id: str,
-    session_factory: sessionmaker[Session], registry: GenerationRegistry,
+    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
+    previous_attempt_id: str | None = None,
 ) -> None:
-    """只结算本次编号；也用于 INSERT 提交异常后的独立连接核对，不重发请求。"""
+    """只结算本次编号；独立核对 INSERT/重试 UPDATE 的提交结果，不重发请求。
+
+    重试 UPDATE 回滚时，原来的 FAILED 行仍在。只有确认它仍是指定的前一次失败，
+    才能释放本次未落库的占用；不能把旧失败行当成本次 RUNNING 来修改。
+    """
     try:
         with registry.locked(chat_id) as slot:
             if slot.attempt_id != attempt_id:
@@ -68,8 +73,15 @@ def _settle_interrupted(
                 question = session.scalar(select(Message).where(
                     Message.chat_session_id == chat_id, Message.client_message_key == client_key,
                 ).with_for_update())
+                if question is None and previous_attempt_id is not None:
+                    raise MessageSendUnavailableError()
                 if question is not None:
-                    if question.role != "USER" or question.attempt_id != attempt_id:
+                    retry_rolled_back = (
+                        previous_attempt_id is not None
+                        and question.attempt_id == previous_attempt_id
+                        and question.generation_status == "FAILED"
+                    )
+                    if question.role != "USER" or (question.attempt_id != attempt_id and not retry_rolled_back):
                         raise MessageSendUnavailableError()
                     _answer_id(session, question)  # 不覆盖已成功的回复，矛盾状态则保留占用待核对。
                     if question.generation_status == "RUNNING":

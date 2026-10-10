@@ -78,6 +78,11 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.build_patch = patch("app.services.chat_execution.build_chat_agent", side_effect=lambda *a: self.agent)
         self.build = self.build_patch.start()
         self.addCleanup(self.build_patch.stop)
+        async def no_memory(accepted, *args):
+            return accepted.prepared_input
+        memory_patch = patch("app.services.chat_execution.prepare_memory_for_turn", side_effect=no_memory)
+        memory_patch.start()
+        self.addCleanup(memory_patch.stop)
 
     async def emit(self, item):
         if item.event_name in ("message_done", "message_error"):

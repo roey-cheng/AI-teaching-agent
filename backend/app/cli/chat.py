@@ -2,15 +2,10 @@
 
 import argparse
 import asyncio
-from pathlib import Path
 import sys
 from uuid import uuid4
 
-from alembic.config import Config
-from alembic.migration import MigrationContext
-from alembic.script import ScriptDirectory
 from pydantic import ValidationError
-from sqlalchemy import Engine, inspect
 
 from app.agent.input_policy import policy_for_model
 from app.cli.terminal import EventPrinter, Terminal, print_history
@@ -18,9 +13,10 @@ from app.core.config import (
     DatabaseSettings, ModelSettings, TracingSettings,
     load_database_settings, load_model_settings, load_tracing_settings,
 )
-from app.db.base import Base
+from app.core.runtime import open_backend_runtime
+from app.core.runtime_lock import RuntimeAlreadyActiveError
 from app.db.engine import build_database_engine
-from app.db.session import build_session_factory
+from app.db.readiness import DatabaseNotReadyError, check_database_ready
 from app.schemas import DuplicateMessageResponse, LoginRequest, RegisterRequest, SendMessageRequest
 from app.services.auth import register_user
 from app.services.authentication import get_current_user
@@ -34,35 +30,18 @@ from app.services.generation_registry import GenerationRegistry
 from app.services.login import login_user
 from app.services.logout import logout_user
 from app.services.message_history import get_message_history
+from app.services.profile_memory import list_profile_memory
 
 HELP = (
     "Type one line to send a real model request. Commands:\n"
     "  /new      Start a new conversation\n"
     "  /history  Read this conversation from MySQL\n"
+    "  /memory   Read your saved profile memory from MySQL\n"
     "  /help     Show this help\n"
     "  /quit     Log out of this terminal and exit\n"
     "Ctrl+C cancels the current turn and exits after cleanup. Wait for cleanup; do not press it repeatedly.\n"
     "No old-session selection, multiline editor, or failed-reply retry in this CLI yet."
 )
-
-
-class DatabaseNotReadyError(Exception):
-    pass
-
-
-def check_database_ready(engine: Engine) -> None:
-    """只读：核对 MySQL、迁移头版本和表存在；不执行迁移、不自动清理旧任务。"""
-    backend = Path(__file__).resolve().parents[2]
-    heads = set(ScriptDirectory.from_config(Config(str(backend / "alembic.ini"))).get_heads())
-    with engine.connect() as connection:
-        dialect = connection.dialect
-        if (dialect.name != "mysql" or getattr(dialect, "is_mariadb", False)
-                or (dialect.server_version_info or ()) < (8, 4)):
-            raise DatabaseNotReadyError()
-        actual = set(MigrationContext.configure(connection).get_current_heads())
-        tables = set(inspect(connection).get_table_names())
-        if actual != heads or not set(Base.metadata.tables).issubset(tables):
-            raise DatabaseNotReadyError()
 
 
 def authenticate(terminal: Terminal, factory):
@@ -105,6 +84,7 @@ def authenticate(terminal: Terminal, factory):
 
 def run_chat(
     terminal: Terminal, factory, model_settings: ModelSettings, tracing_settings: TracingSettings,
+    *, registry: GenerationRegistry | None = None, limiter: GenerationRateLimiter | None = None,
 ) -> int:
     """同步终端循环 + 持续复用的 Runner。等待键盘时没有 Agent 在后台运行。
 
@@ -123,8 +103,8 @@ def run_chat(
         chat = create_chat_session(user, factory)
         terminal.write(f"Signed in as {user.display_name}. New session: {chat.session_id}")
         terminal.write(HELP)
-        registry = GenerationRegistry()
-        limiter = GenerationRateLimiter()
+        registry = registry if registry is not None else GenerationRegistry()
+        limiter = limiter if limiter is not None else GenerationRateLimiter()
         printer = EventPrinter(terminal)
         # 提交结果不明后暂停发送；保留原 key，不自动以新 key 重发。
         uncertain_request: SendMessageRequest | None = None
@@ -140,10 +120,18 @@ def run_chat(
                 if not command:
                     terminal.write("Empty messages are not sent.")
                     continue
-                if command.startswith("/") and command not in ("/new", "/history"):
+                if command.startswith("/") and command not in ("/new", "/history", "/memory"):
                     terminal.write("Unknown command. Use /help; nothing was sent to the model.")
                     continue
                 user = get_current_user(token, factory)  # 每次真实业务操作都重新检查身份。
+                if command == "/memory":
+                    memory = list_profile_memory(user, factory)
+                    terminal.write("[Profile memory]")
+                    if not memory.items:
+                        terminal.write("No saved profile memory yet.")
+                    for item in memory.items:
+                        terminal.write(f"[{item.memory_type}] {item.summary}")
+                    continue
                 if command == "/history":
                     history = get_message_history(user, chat.session_id, factory, registry)
                     print_history(terminal, history)
@@ -213,16 +201,27 @@ def launch(
         check_database_ready(engine)
         terminal.write(f"Database: {database.name} at {database.host}:{database.port}")
         terminal.write(f"Model: {model.name}. Real model requests may incur API charges.")
+        terminal.write("Each question may use one memory-check model call plus one answering call. Eligible long-term facts may be saved; use /memory to inspect them.")
         terminal.write("Accounts, sessions, questions, and final answers will be saved to this database and will NOT be deleted on exit.")
         if tracing.tracing:
             terminal.write(f"LangSmith is ON: prompts, memory, reasoning, and answers may be uploaded to project {tracing.project}.")
         else:
             terminal.write("LangSmith is OFF.")
         terminal.write("Local single-process tool only. Stop other chat-service/CLI processes using this database before continuing.")
+        terminal.write("After confirmation, startup reconciliation will mark abandoned generations interrupted or restore saved answers. It will not call the model or delete chat history.")
         if terminal.read("Continue with this database and real model? [y/N]: ").strip().lower() not in ("y", "yes"):
             terminal.write("Cancelled. No account, conversation, or model request was created.")
             return 0
-        return run_chat(terminal, build_session_factory(engine), model, tracing)
+        with open_backend_runtime(engine) as runtime:
+            terminal.write(
+                f"Startup reconciliation complete: {runtime.cleanup.interrupted} interrupted, "
+                f"{runtime.cleanup.restored_success} restored successful."
+            )
+            return run_chat(terminal, runtime.session_factory, model, tracing,
+                            registry=runtime.registry, limiter=runtime.limiter)
+    except RuntimeAlreadyActiveError:
+        terminal.write("Another chat process is using this project. Stop it before starting the terminal. No startup cleanup was run.")
+        return 1
     except DatabaseNotReadyError:
         terminal.write("Database is not ready: MySQL 8.4+ and the current project migrations are required. Check Alembic status; no migration was run.")
         return 1
