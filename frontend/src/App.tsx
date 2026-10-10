@@ -1,110 +1,226 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
-type ConnectionState =
-  | { kind: 'loading' }
-  | { kind: 'success' }
-  | { kind: 'error'; message: string }
+import { accountApi, ApiError, sessionApi, streamChat, userFacingError } from './api/client'
+import { AuthScreen } from './components/AuthScreen'
+import { ChatPanel } from './components/ChatPanel'
+import { Icon } from './components/Icons'
+import { MemoryDrawer } from './components/MemoryDrawer'
+import { Sidebar } from './components/Sidebar'
+import { useLanguage } from './i18n'
+import type { ChatSession, LiveGeneration, MessageHistory, StreamEvent, User, UserMessage } from './types'
+
+type AuthState =
+  | { kind: 'checking' }
+  | { kind: 'guest' }
+  | { kind: 'authenticated'; user: User }
+  | { kind: 'unavailable'; error: unknown }
 
 export default function App() {
-  // connection 保存当前连接状态；setConnection 负责更新状态、记录检查结果，
-  // 并让 React 根据新状态更新页面。这里仅保存在页面内存中，不会写入数据库。
-  const [connection, setConnection] = useState<ConnectionState>({ kind: 'loading' })
-  const [checkNumber, setCheckNumber] = useState(0)
+  const { language, t } = useLanguage()
+  const [auth, setAuth] = useState<AuthState>({ kind: 'checking' })
+  const [sessions, setSessions] = useState<ChatSession[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [history, setHistory] = useState<MessageHistory | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [live, setLive] = useState<LiveGeneration | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [memoryOpen, setMemoryOpen] = useState(false)
+  const [toast, setToast] = useState('')
 
-  // 打开页面或点击重新检查时，发送一次真实的后端请求。
+  const user = auth.kind === 'authenticated' ? auth.user : null
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.session_id === activeSessionId) ?? null,
+    [activeSessionId, sessions],
+  )
+
+  const checkAuthentication = useCallback(async () => {
+    setAuth({ kind: 'checking' })
+    try {
+      setAuth({ kind: 'authenticated', user: await accountApi.me() })
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) setAuth({ kind: 'guest' })
+      else setAuth({ kind: 'unavailable', error })
+    }
+  }, [])
+
+  useEffect(() => { void checkAuthentication() }, [checkAuthentication])
+
   useEffect(() => {
-    const controller = new AbortController()
-    let disposed = false
-    let timedOut = false
-    const timeout = window.setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, 5000)
-
-    async function checkBackend() {
-      try {
-        // fetch 负责“问后端”：向 /health 发送请求，等待后端回答。
-        // 相对路径会先到 Vite，再由开发代理转发到 FastAPI。
-        const response = await fetch('/health', {
-          signal: controller.signal,
-          cache: 'no-store',
-          headers: { Accept: 'application/json' },
-        })
-        if (!response.ok) throw new Error(`后端返回 HTTP ${response.status}，请检查后端终端。`)
-
-        const body: unknown = await response.json()
-        if (
-          typeof body !== 'object' || body === null ||
-          !('status' in body) || body.status !== 'ok'
-        ) {
-          throw new Error('后端响应格式不正确，预期收到 {"status":"ok"}。')
-        }
-
-        if (!disposed) setConnection({ kind: 'success' })
-      } catch (error) {
-        if (disposed) return
-        const message = timedOut
-          ? '等待超过 5 秒，请确认后端已启动，然后重新检查。'
-          : error instanceof Error
-            ? error.message
-            : '无法连接后端，请确认后端已启动。'
-        setConnection({ kind: 'error', message })
-      } finally {
-        window.clearTimeout(timeout)
-      }
+    function authenticationExpired() {
+      setAuth({ kind: 'guest' })
+      setSessions([])
+      setActiveSessionId(null)
+      setHistory(null)
+      setLive(null)
     }
+    window.addEventListener('mentor:authentication-expired', authenticationExpired)
+    return () => window.removeEventListener('mentor:authentication-expired', authenticationExpired)
+  }, [])
 
-    void checkBackend()
-    return () => {
-      disposed = true
-      window.clearTimeout(timeout)
-      controller.abort()
+  const refreshSessions = useCallback(async (preferredId?: string) => {
+    const nextSessions = await sessionApi.list()
+    setSessions(nextSessions)
+    setActiveSessionId((current) => {
+      if (preferredId && nextSessions.some((item) => item.session_id === preferredId)) return preferredId
+      if (current && nextSessions.some((item) => item.session_id === current)) return current
+      return nextSessions[0]?.session_id ?? null
+    })
+    return nextSessions
+  }, [])
+
+  useEffect(() => {
+    if (!user) return
+    refreshSessions().catch((error) => setToast(userFacingError(error, language)))
+  }, [language, refreshSessions, user])
+
+  const refreshHistory = useCallback(async (sessionId: string) => {
+    const nextHistory = await sessionApi.history(sessionId)
+    setHistory((current) => activeSessionId === sessionId || current?.session_id === sessionId ? nextHistory : current)
+    return nextHistory
+  }, [activeSessionId])
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      setHistory(null)
+      return
     }
-  }, [checkNumber])
+    let active = true
+    setHistoryLoading(true)
+    setHistory(null)
+    sessionApi.history(activeSessionId)
+      .then((result) => { if (active) setHistory(result) })
+      .catch((error) => { if (active) setToast(userFacingError(error, language)) })
+      .finally(() => { if (active) setHistoryLoading(false) })
+    return () => { active = false }
+  }, [activeSessionId, language])
 
-  function checkAgain() {
-    setConnection({ kind: 'loading' })
-    setCheckNumber((previous) => previous + 1)
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(''), 5000)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  async function createSession(): Promise<ChatSession | null> {
+    if (live) return null
+    try {
+      const created = await sessionApi.create()
+      setSessions((current) => [created, ...current])
+      setActiveSessionId(created.session_id)
+      setHistory({ session_id: created.session_id, is_generating: false, items: [] })
+      setSidebarOpen(false)
+      return created
+    } catch (error) {
+      setToast(userFacingError(error, language))
+      return null
+    }
   }
 
-  // return 里面描述页面显示什么：根据 connection 的状态，
-  // 分别显示“正在连接后端…”、“后端连接成功”或“后端连接失败”。
+  async function renameSession(sessionId: string, title: string) {
+    try {
+      const renamed = await sessionApi.rename(sessionId, title)
+      setSessions((current) => current.map((session) => session.session_id === sessionId ? renamed : session))
+    } catch (error) {
+      setToast(userFacingError(error, language))
+    }
+  }
+
+  function applyStreamEvent(event: StreamEvent) {
+    setLive((current) => {
+      if (!current) return current
+      switch (event.type) {
+        case 'message_start': return { ...current, attemptId: event.data.attempt_id }
+        case 'agent_progress': return { ...current, attemptId: event.data.attempt_id, stage: event.data.stage }
+        case 'reasoning_delta': return { ...current, attemptId: event.data.attempt_id, reasoning: current.reasoning + event.data.text }
+        case 'message_delta': return { ...current, attemptId: event.data.attempt_id, answer: current.answer + event.data.text }
+        case 'message_done': return { ...current, attemptId: event.data.attempt_id, stage: 'saving' }
+        case 'message_error': return { ...current, attemptId: event.data.attempt_id, error: event.data.error }
+      }
+    })
+  }
+
+  async function runGeneration(sessionId: string, mode: 'send' | 'retry', content: string, path: string, body: unknown) {
+    let terminalEvent = false
+    setLive({ sessionId, mode, userContent: content, attemptId: null, stage: null, reasoning: '', answer: '', error: null })
+    try {
+      const duplicate = await streamChat(path, body, (event) => {
+        if (event.type === 'message_done' || event.type === 'message_error') terminalEvent = true
+        applyStreamEvent(event)
+      })
+      if (!duplicate && !terminalEvent) setToast(t('streamEnded'))
+    } catch (error) {
+      setToast(userFacingError(error, language))
+    } finally {
+      try {
+        await Promise.all([refreshHistory(sessionId), refreshSessions(sessionId)])
+      } catch (error) {
+        setToast(userFacingError(error, language))
+      }
+      setLive(null)
+    }
+  }
+
+  async function sendMessage(content: string) {
+    const session = activeSession ?? await createSession()
+    if (!session) return
+    await runGeneration(session.session_id, 'send', content, `/api/v1/chat/sessions/${session.session_id}/messages`, {
+      client_message_key: crypto.randomUUID(), content,
+    })
+  }
+
+  async function retryMessage(message: UserMessage) {
+    if (!activeSessionId) return
+    await runGeneration(
+      activeSessionId,
+      'retry',
+      message.content,
+      `/api/v1/chat/sessions/${activeSessionId}/messages/${message.message_id}/retry`,
+      { failed_attempt_id: message.generation.attempt_id },
+    )
+  }
+
+  async function logout() {
+    try {
+      await accountApi.logout()
+    } catch (error) {
+      setToast(userFacingError(error, language))
+    } finally {
+      setAuth({ kind: 'guest' })
+      setSessions([])
+      setActiveSessionId(null)
+      setHistory(null)
+    }
+  }
+
+  if (auth.kind === 'checking') {
+    return <main className="boot-screen"><span className="brand-mark"><Icon name="sparkle" /></span><div className="boot-line" /></main>
+  }
+
+  if (auth.kind === 'unavailable') {
+    return <main className="error-screen"><span className="brand-mark"><Icon name="sparkle" /></span><h1>{t('backendUnavailable')}</h1><p>{userFacingError(auth.error, language)}</p><button className="primary-button" onClick={() => void checkAuthentication()} type="button">{t('reconnect')}</button></main>
+  }
+
+  if (auth.kind === 'guest') {
+    return <AuthScreen onAuthenticated={(authenticatedUser) => setAuth({ kind: 'authenticated', user: authenticatedUser })} />
+  }
+
   return (
-    <main className="page">
-      <header>
-        <p className="eyebrow">AI TEACHING ASSISTANT</p>
-        <h1>先让前端与后端说上话。</h1>
-        <p className="intro">这是项目的第一张测试页面，用一次真实请求检查连接。</p>
-      </header>
-
-      <section className="card" aria-labelledby="connection-title">
-        <p className="label" id="connection-title">连接检查 · GET /health</p>
-        <div role="status" aria-live="polite" aria-atomic="true">
-          <h2 className={`status ${connection.kind}`}>
-            {connection.kind === 'loading' && '正在连接后端…'}
-            {connection.kind === 'success' && '后端连接成功'}
-            {connection.kind === 'error' && '后端连接失败'}
-          </h2>
-          <p className="detail">
-            {connection.kind === 'loading' && '网页正在等待 FastAPI 回答，最多等待 5 秒。'}
-            {connection.kind === 'success' && <>后端已返回 <code>{'{"status":"ok"}'}</code>，前后端请求链路已接通。</>}
-            {connection.kind === 'error' && connection.message}
-          </p>
-        </div>
-        <button onClick={checkAgain} disabled={connection.kind === 'loading'}>
-          {connection.kind === 'loading' ? '检查中…' : '重新检查连接'}
-        </button>
-      </section>
-
-      <section className="explanation" aria-labelledby="request-title">
-        <h2 id="request-title">这次请求经过哪里？</h2>
-        <ol>
-          <li><strong>浏览器里的 React 页面</strong><span>发出 GET /health 请求。</span></li>
-          <li><strong>Vite 开发服务 · 5173</strong><span>把请求转发给本机后端。</span></li>
-          <li><strong>FastAPI 后端 · 8000</strong><span>返回状态，页面据此显示连接结果。</span></li>
-        </ol>
-      </section>
-      <p className="note">当前仅检查网页与后端的连接，不代表数据库或大模型已连接。结果是本次检查的快照，不会自动持续监测。</p>
-    </main>
+    <div className="app-shell">
+      <Sidebar
+        activeSessionId={activeSessionId}
+        disabled={Boolean(live)}
+        onClose={() => setSidebarOpen(false)}
+        onCreate={() => void createSession()}
+        onLogout={() => void logout()}
+        onMemory={() => { setMemoryOpen(true); setSidebarOpen(false) }}
+        onRename={renameSession}
+        onSelect={(sessionId) => { setActiveSessionId(sessionId); setSidebarOpen(false) }}
+        open={sidebarOpen}
+        sessions={sessions}
+        user={auth.user}
+      />
+      <ChatPanel history={history} historyLoading={historyLoading} live={live} onMenu={() => setSidebarOpen(true)} onRetry={retryMessage} onSend={sendMessage} session={activeSession} />
+      <MemoryDrawer onClose={() => setMemoryOpen(false)} open={memoryOpen} />
+      {toast && <div className="toast" role="status"><span>{toast}</span><button aria-label={t('closeNotice')} onClick={() => setToast('')} type="button"><Icon name="close" /></button></div>}
+    </div>
   )
 }

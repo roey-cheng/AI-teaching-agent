@@ -1,52 +1,49 @@
 # 前端
 
-已经建立 React + TypeScript + Vite 的最小前端。当前只有连接检查页面，还没有登录、聊天或 Profile Memory 页面。本次是在已有目录中逐个建立配置和入口文件，没有用初始化命令覆盖已有文件。
+第一版网页已经接通全部 11 个后端业务接口。页面使用 React + TypeScript + Vite，整体采用简洁、以对话为中心的布局，支持桌面和手机宽度。登录页为单列居中布局，不再展示左侧宣传海报。
 
-## 先认识工具
+## 用户现在能做什么
 
-| 名称 | 在这个项目里做什么 |
+- 注册、登录、退出；登录凭据由后端放在 HttpOnly Cookie 中，前端不保存密码或 Token。
+- 新建、切换和重命名对话；左侧栏读取当前用户的真实会话。
+- 读取完整历史，发送多行文字并逐步显示 SSE 回答。
+- 分开展示 Agent 工作进度、模型 API 返回的思考文字和最终回答。
+- 展示 Markdown、列表、表格和代码块。
+- 查看失败摘要，并重试后端允许重试的最后一个失败问题。
+- 打开 Profile Memory 抽屉，查看 Agent 为当前账号保存的长期记忆。
+- 在中文和英文界面之间切换；选择会保存在当前浏览器中。
+- 在窄屏上使用抽屉式会话栏。
+
+## 代码是怎样分工的
+
+| 文件 | 主要职责 |
 |---|---|
-| React | 帮我们组织页面，并根据连接状态更新文字和按钮 |
-| TypeScript | 编写前端逻辑，开发时检查类型错误；检查通过不等于运行时一定正确 |
-| React DOM | 将 React 描述的页面显示到浏览器中 |
-| Vite | 运行开发服务、处理浏览器需要的代码，并提供生产打包功能 |
-| Node.js | 在电脑上运行 Vite 等开发工具，不是本项目的 Python 后端 |
-| npm | 安装依赖，并执行 package.json 中定义的命令 |
+| `src/App.tsx` | 页面总指挥：恢复登录、加载会话与历史、协调发送和重试 |
+| `src/api/client.ts` | 调用 11 个 HTTP 接口，把后端错误转成前端可处理的对象 |
+| `src/api/sse.ts` | 将网络分片重新拼接成完整 SSE 事件；网络分片不等于一个事件 |
+| `src/types.ts` | 后端请求、响应和 SSE 事件在 TypeScript 中的形状 |
+| `src/components/AuthScreen.tsx` | 登录和注册页面；注册成功后再调用一次登录接口 |
+| `src/components/Sidebar.tsx` | 会话列表、新建、切换、重命名、记忆入口和退出 |
+| `src/components/ChatPanel.tsx` | 历史消息、实时进度/思考/回答、失败重试和输入框 |
+| `src/components/MemoryDrawer.tsx` | 读取并展示当前用户的 Profile Memory |
+| `src/i18n.tsx` | 中英文案、当前语言状态和浏览器持久化 |
+| `src/components/Markdown.tsx` | 安全地把模型的 Markdown 内容渲染成页面结构 |
+| `src/styles.css` | 桌面/手机布局、颜色、排版和动画 |
 
-本机验证环境：Node.js 26.8.2、npm 11.19.1。初始依赖包括 React 19.3.0、TypeScript 7.0.2、Vite 8.3.0；完整的具体版本以 `package-lock.json` 为准。项目使用的 Vite 要求 Node.js 20.19+（20 系列）或 22.12+。
+React 负责根据状态更新页面，TypeScript 在开发阶段检查数据形状，Vite 负责本地开发服务和打包。`react-markdown` 与 `remark-gfm` 只负责展示回答；它们不调用模型。Vitest 用来测试 SSE 分片解析。
 
-## 文件是做什么的？
+## 本地启动
 
-| 文件或目录 | 作用 |
-|---|---|
-| `package.json` | 前端依赖清单和命令表，类似后端的依赖声明 |
-| `package-lock.json` | 记录具体依赖版本，作用类似后端的 uv.lock；需要提交 Git |
-| `node_modules/` | npm 下载的依赖，自动生成，不提交 Git |
-| `index.html` | 浏览器加载的 HTML 入口，提供 root 元素并引入 main.tsx |
-| `src/main.tsx` | 启动 React，把 App 页面放进 root 元素 |
-| `src/App.tsx` | 连接检查页面、请求后端和显示检查结果的逻辑 |
-| `src/styles.css` | 页面的颜色、字号、间距等样式 |
-| `tsconfig.json` | TypeScript 的检查规则 |
-| `vite.config.ts` | Vite 的端口和请求转发配置 |
-| `dist/` | 打包生成的网页文件，不提交 Git，也不要直接修改 |
+需要两个终端保持运行。
 
-`.tsx` 是可以同时编写 TypeScript 逻辑和 JSX 页面描述的文件。浏览器不是直接执行我们写的 TypeScript，开发时由 Vite 处理成浏览器能够运行的代码。
-
-## 怎样启动：两个终端，分别保持运行
-
-### 终端一：启动后端
-
-先准备 MySQL、当前迁移和后端 `DB_*` 配置，并停止项目的终端聊天程序。FastAPI 现在会在启动时核对残留生成状态，成功后才接受请求；终端聊天与 FastAPI 共用同一项目进程锁，不能同时运行。Vite 前端可以和 FastAPI 同时运行。
+终端一启动后端：
 
 ```bash
 cd /Users/roey/projects/AI-teaching-agent/backend
-uv sync --locked
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-第一次同步或更换依赖后需要 `uv sync --locked`；平时可直接运行最后一条命令。`app.main:app` 表示使用 `app/main.py` 里的 `app` 对象。`--reload` 表示修改 Python 文件后自动重启开发服务。
-
-### 终端二：启动前端
+终端二启动前端：
 
 ```bash
 cd /Users/roey/projects/AI-teaching-agent/frontend
@@ -54,66 +51,35 @@ npm ci
 npm run dev
 ```
 
-- 本次第一次安装使用 `npm install`，它生成了锁定文件。
-- 后续下载项目或需要重建依赖时，使用 `npm ci` 按锁定文件安装；它会重建 node_modules，不需要每次启动都执行。
-- `npm run dev` 执行 package.json 中名为 dev 的命令，也就是启动 Vite。
-- 看到开发地址后，打开 <http://localhost:5173/>。`localhost` 指当前电脑，不是已发布的公网地址。
-- 前后端必须同时运行。终端一直显示日志、没有返回输入提示符，是服务正在运行，不是卡住了。
-- 停止某个服务时，在运行它的终端按 `Ctrl+C`。
-- 若提示端口被占用，先确认是不是已经启动过。配置了 strictPort，Vite 不会悄悄改用另一个端口。
+然后访问 <http://localhost:5173/>。Vite 会把浏览器发往 `/api/v1/...` 和 `/health` 的请求转发到本机 8000 端口。这个代理只服务于本地开发，正式部署还需在网站服务器配置同站点转发。
 
-以上是本机路径，换电脑时需要改成自己的项目位置。服务只监听本机，不开放给局域网或公网。
-
-## 页面怎样知道“后端连接成功”？
+## 一次聊天怎样到达页面
 
 ```text
-浏览器打开 localhost:5173，加载 React 页面
-    ↓ 页面发送 GET /health
-Vite 开发服务（5173）
-    ↓ 按代理配置转发，路径仍是 /health
-FastAPI 后端（127.0.0.1:8000）
-    ↓ 返回 HTTP 200 和 {"status":"ok"}
-Vite 把响应传回浏览器
-    ↓ 页面检查响应状态和内容
-显示“后端连接成功”
+用户按 Enter
+  → 前端生成 client_message_key，并 POST 问题
+  → 后端验证 Cookie、保存 USER 消息、运行 Deep Agents
+  → SSE 依次送来进度、思考片段、回答片段和完成事件
+  → 前端逐步更新当前气泡
+  → 完成后重新查询历史与会话列表，以数据库结果为准
 ```
 
-“代理”在这里就是帮忙转发请求。浏览器只向前端同一地址发请求，Vite 再访问另一个端口的后端，因此本地这条链路不需要把后端设置为允许所有跨域来源。
+前端使用 `fetch()` 读取 POST 返回的流，不使用只能方便发送 GET 的原生 `EventSource`。若网络结束前没有收到成功或失败终态，页面不会猜测结果，而是重新查询历史。相同 `client_message_key` 的网络重发由后端识别，不会重复生成。
 
-页面打开时自动检查，也可点击“重新检查连接”。等待期间按钮禁用；超过 5 秒、HTTP 错误或响应格式错误会显示失败，不会假装成功。检查结果只是当时的快照，不会持续自动监控；后端停止后需要重新检查才能更新结果。
-
-开发时启用了 React StrictMode，可能看到额外的检查请求，这是开发检查和清理机制，不是业务消息重复发送。
-
-`/health` 请求本身只检查后端 HTTP 应用能否响应，不实时检查数据库和模型，也不算原设计的 11 个业务接口之一。FastAPI 的启动流程已经要求数据库可连接且启动清理成功；这与每次 `/health` 是否查询数据库是两回事。
-
-## 自己验证成功与失败
-
-1. 同时启动前后端，打开页面，确认出现“后端连接成功”。
-2. 在后端终端按 Ctrl+C 停止后端，前端保持运行。
-3. 点击“重新检查连接”，应显示失败，而不是停留在成功。
-4. 再次启动后端，点击重新检查，应恢复成功。
-
-也可以在终端检查代理：
+## 检查和打包
 
 ```bash
-curl http://localhost:5173/health
-```
-
-后端运行时应返回 `{"status":"ok"}`。这是请求链路检查，不代替浏览器里的页面检查。
-
-## 类型检查与打包
-
-在 frontend 目录执行：
-
-```bash
+cd /Users/roey/projects/AI-teaching-agent/frontend
+npm run test
 npm run typecheck
 npm run build
+npm audit
 ```
 
-第一条检查 TypeScript；第二条先检查，再将页面打包进 dist。打包不是启动服务，也不是自动部署到互联网。当前代理仅用于 Vite 开发服务；正式部署还需要配置网站服务的请求转发。
+`npm run build` 会依次执行自动测试、类型检查和生产打包。生成的 `dist/` 是构建产物，不提交 Git，也不要直接修改。
 
 ## 配置与秘密
 
-`.env.example` 中的 `VITE_API_BASE_URL=/api/v1` 预留给后续业务接口代码；当前健康检查固定请求 `/health`，尚未读取这个变量，不需要创建 `.env` 就能运行页面。开发代理已经配置 `/health` 和 `/api/v1`，但后端暂时只实现 `/health`，业务路径仍会返回 404。
+前端代码和 `VITE_*` 配置最终会被浏览器用户看到，因此不能放数据库密码、模型 API Key、LangSmith Key 或任何服务端秘密。当前前端只使用同站点相对路径，不需要在 `.env` 中保存后端密钥。
 
-`VITE_` 开头的配置可以进入浏览器代码，只能放允许公开的信息，不能放数据库密码、模型 API Key 或其他秘密。
+思考文字只展示模型 API 明确返回的内容，不伪造也不声称是模型完整的内部思维。思考与进度不写入聊天历史；最终回答和长期记忆由后端持久化。
