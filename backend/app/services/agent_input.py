@@ -1,4 +1,4 @@
-"""在保存新 USER 前组装输入快照；只读取本会话历史和本用户记忆，不调用 Agent。"""
+"""新发送/重试准入时组装输入快照；只读取本会话历史和本用户记忆，不调用 Agent。"""
 
 from dataclasses import dataclass, field
 import json
@@ -64,16 +64,18 @@ def _profile_memory(session: Session, user_id: int) -> str:
 
 def prepare_agent_input(
     session: Session, current_user: UserResponse, session_id: str,
-    request: SendMessageRequest, policy: AgentInputPolicy,
+    request: SendMessageRequest, policy: AgentInputPolicy, *, retry_message_id: str | None = None,
 ) -> PreparedAgentInput:
-    """新问题专用：复用准入事务，返回后不再重新加载另一份历史或记忆。
+    """复用准入事务，返回后不再重新加载另一份历史或记忆。
 
     不开启/提交事务、不写数据、不领取运行锁；调用者负责连接生命周期。
-    当前问题尚未落库，故只在末尾加入一次。重试入口后续单独接入，不能直接复用为追加消息。
+    新发送的问题尚未落库；重试的问题由准入层读取并验证为最后一个失败问题。
+    重试时显式排除原问题的历史行，再把原文加入末尾一次，不插入新的数据库消息。
     """
     chat_id = int(format_database_id(session_id, "Session ID"))
     user_id = int(format_database_id(current_user.user_id, "User ID"))
     request = SendMessageRequest.model_validate(request.model_dump())
+    retry_id = None if retry_message_id is None else int(format_database_id(retry_message_id, "Message ID"))
     try:
         owned = session.scalar(select(ChatSession.chat_session_id).where(
             ChatSession.chat_session_id == chat_id, ChatSession.user_id == user_id,
@@ -100,6 +102,8 @@ def prepare_agent_input(
                 question.chat_session_id == chat_id, question.role == "USER",
                 question.generation_status == "SUCCEEDED",
             )
+            if retry_id is not None:
+                query = query.where(question.message_id != retry_id)
             if before is not None:
                 timestamp, message_id = before
                 query = query.where(or_(
@@ -131,7 +135,8 @@ def prepare_agent_input(
         messages = tuple(item for pair in reversed(selected) for item in pair)
         return PreparedAgentInput(
             user_id=str(user_id), session_id=str(chat_id), policy=policy,
-            messages=messages + (InputMessage("user", request.content),), profile_memory=memory,
+            messages=messages + (InputMessage("user", request.content, None if retry_id is None else str(retry_id)),),
+            profile_memory=memory,
             estimated_input_tokens=used, history_rounds=len(selected), history_truncated=truncated,
         )
     except SQLAlchemyError:

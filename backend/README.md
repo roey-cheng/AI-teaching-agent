@@ -2,7 +2,7 @@
 
 语言约定：程序自身的运行提示和校验报错使用英文；代码注释与教学说明保留中文。用户消息、昵称、记忆及模型回答不在此规则下强制翻译。
 
-使用 Python + FastAPI，在 `app/` 中逐步实现账号、聊天和 Deep Agents 等功能。目前已准备独立 Python 环境和基础依赖，并创建应用入口 `app/main.py` 及 `GET /health` 接口；账号和聊天等业务接口尚未实现。
+使用 Python + FastAPI，在 `app/` 中逐步实现账号、聊天和 Deep Agents 等功能。应用入口为 `app/main.py`；现已接通 `GET /health` 和全部 11 个业务 HTTP 接口，包含发送消息、失败重试的 SSE。React 业务页面、浏览器端到端及真实供应商 HTTP 联调仍待完成。
 
 ## Python 环境
 
@@ -31,7 +31,176 @@
 
 以上库还会自动安装它们所需的其他依赖，包括 LangGraph。安装了模型相关库不代表已经选定模型提供方，也不会自动调用模型。
 
-MySQL 驱动、SQLAlchemy 和 Alembic 已安装，五张表模型、迁移、API Schema、账号/会话/历史业务已有测试，用户已报告项目库建表成功。已有运行登记、消息准入、防重、输入组装、正式 Deep Agents 和只读记忆适配。2026-10-11 增加新消息异步执行器及终端聊天入口：支持思考/进度事件、最终回答保存、超时取消、迟到结果保护与单进程生成限流。随后补充记忆存取服务，最新 338 项离线测试、104 项隔离 MySQL 测试通过；详见“个人记忆保存与查询业务”。Agent 记忆提取/写入工具、失败重试、启动残留清理、HTTP/SSE、Cookie 和网页尚未接入。本次自动测试未调用真实模型或 LangSmith，也未连接或修改项目数据库。
+MySQL 驱动、SQLAlchemy 和 Alembic 已安装，五张表模型、迁移、API Schema、账号/会话/历史业务已有测试，用户已报告项目库建表成功。已有正式 Deep Agents、聊天执行器、终端入口、思考/进度事件、结果保存和单进程生成控制。已接记忆存取服务、独立记忆 Agent 与 `/memory`，详见“Agent 自动记忆：两阶段执行”。失败重试业务及共享执行器已实现；终端和 FastAPI 已接启动残留清理及同项目进程锁。全部 11 个业务 HTTP 接口已接通，含 Cookie、来源检查、账号/生成限流和 SSE；终端 `/retry` 命令及网页尚未接入。本次自动测试未调用真实模型或 LangSmith，也未连接或修改项目数据库。下文早期阶段记录中的“未来接口”属于当时进度，以本节及下方 HTTP/SSE 小节最新状态为准。
+
+## 账号 HTTP 接口
+
+2026-10-11：把已有的账号 Schema 和业务服务接到 FastAPI，没有增加数据库表、迁移或依赖。四个接口是真实业务，不是假用户响应；网页注册/登录表单尚未编写。
+
+| 方法和路径 | 调用的业务函数 | 成功结果 |
+|---|---|---|
+| `POST /api/v1/auth/register` | `register_user` | 201，公开用户信息；不自动登录 |
+| `POST /api/v1/auth/login` | `login_user` | 200，用户信息 + 登录 Cookie |
+| `POST /api/v1/auth/logout` | `logout_user` | 204，无正文，撤销当前凭据并清除 Cookie |
+| `GET /api/v1/users/me` | `get_current_user` | 200，Cookie 对应的当前用户 |
+
+### 文件职责与阅读顺序
+
+1. `app/core/http_config.py`：读取 `HTTP_*`，定义可信页面来源和 Cookie 是否只通过 HTTPS 发送。启动时才读取；不改变已有数据库/模型配置。
+2. `app/api/errors.py`：把业务错误转换成 HTTP 状态和 `error.code/message/request_id`；校验失败不回显输入。未知错误只返回安全英文提示，日志仅记录请求编号，不记录异常、SQL、密码或请求体。
+3. `app/api/security.py`：先检查 POST 的 Origin，再检查查询参数、限流、JSON 类型和 16 KiB 正文上限。登录 IP/规范化邮箱分别 10 次/分钟，注册 IP 10 次/小时；进程内保存，重启重置。IP 额度计入已通过来源/查询检查的请求（包括后续格式错误）；邮箱额度在 Schema 通过后计入。已满的计数表拒绝新身份，不淘汰有效计数；到期条目清理。
+4. `app/api/accounts.py`：四个路由。接收 Schema/读取 Cookie，把完整同步业务放在线程中执行，再返回公开响应。登录业务提交成功后才设置 Cookie，退出成功后才清除 Cookie。
+5. `app/main.py`：挂载路由、错误处理和请求编号中间件；让接口复用启动时创建的数据库 Session factory，不另建数据库连接配置。
+6. `tests/test_account_http.py`：离线测试 HTTP 输入输出、Cookie、错误脱敏、来源检查和限流。`scripts/account_http_mysql_cases.py`：真实 HTTP→业务→临时 MySQL 的注册/登录/退出、隔离、轮换、过期和重启测试；已加入原验收脚本。
+
+Cookie 名为 `chat_session`，HttpOnly、SameSite=Lax、Path=/、无 Domain（仅当前主机），固定 7 天、不滑动续期。注册不创建 Cookie；登录 JSON 不返回凭据；退出不撤销其他设备，也不删除聊天数据。所有 HTTP 响应带 `X-Request-ID` 和 `Cache-Control: no-store`。
+
+POST 必须带允许的 `Origin`，缺少、`null`、重复或不匹配返回 403。注册/登录要求 `Content-Type: application/json`，可带 charset；其他类型返回 415。账号请求正文超过 16 KiB 返回 413。退出与当前用户不接受正文；四个接口都不接受查询参数，违反时返回 422。未知字段仍由既有 Schema 拒绝。频率超限返回 429 和 `Retry-After` 秒数。
+
+### 本地测试入口
+
+准备好 MySQL/迁移/`DB_*`，停止终端聊天，然后运行：
+
+```bash
+cd /Users/roey/projects/AI-teaching-agent/backend
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+打开 <http://127.0.0.1:8000/docs>，展开 Accounts 中的接口，用 Try it out 按“注册→登录→当前用户→退出→当前用户”测试。登录后的 Cookie 由同一浏览器保存并携带，退出后的当前用户应返回 401。注册、登录会实际写入项目数据库，但不会调用大模型。终端 curl 等非浏览器客户端也必须显式提供可信 Origin；Origin 是浏览器跨站防护，不是账号认证的替代品。
+
+默认允许本机 `localhost` / `127.0.0.1` 的 5173（Vite）与 8000（后端文档页）来源，不需要修改现有 `.env`。可选模板见 `http.env.example`，只合并需要的配置，不要覆盖已有密钥。部署时必须改成真实 HTTPS 来源、`HTTP_COOKIE_SECURE=true`，配置同站点反向代理，不启用宽泛 CORS。来源列表精确匹配，不带末尾 `/`。
+
+限流使用 ASGI 提供的客户端地址，不自行相信 `X-Forwarded-For`。部署代理时必须限制 Uvicorn 的受信代理地址（`--forwarded-allow-ips`），不直接信任公网客户端任意转发头。当前仅支持一个后端进程；生产还需网关层请求体积/连接超时和资源保护。
+
+自动测试不使用项目数据库：
+
+```bash
+uv run python -m unittest discover -s tests -q
+uv run python scripts/check_migration_mysql.py
+```
+
+本次新增 18 项离线测试、4 项真实 HTTP/MySQL 测试；完整 403 项离线、142 项隔离 MySQL 测试及迁移往返验证通过。临时容器与一次性测试数据已清理，没有修改项目数据库、调用真实模型或发送 LangSmith trace。
+
+## 会话、历史与 Profile Memory HTTP 接口
+
+2026-10-11：复用既有 Schema 和业务函数，新增五个接口，不增加表、迁移、依赖或模型调用。此阶段先将接口接到 9 个；随后完成剩余两个 SSE 接口，见下一节。
+
+| 方法与路径 | 用途 | 请求/响应 |
+|---|---|---|
+| `POST /api/v1/chat/sessions` | 新建自己的空会话 | 必须提交 `{}`，返回 201 会话对象 |
+| `GET /api/v1/chat/sessions` | 左侧栏会话列表 | 返回 200 `items`，最近活跃优先 |
+| `PATCH /api/v1/chat/sessions/{session_id}` | 只修改标题 | `{"title":"新标题"}`，返回 200 会话对象 |
+| `GET /api/v1/chat/sessions/{session_id}/messages` | 当前会话全部历史 | 返回 `session_id`、`is_generating`、`items` |
+| `GET /api/v1/me/memory` | 查看本人已保存的记忆 | 返回 200 `items`，未保存记忆时为空列表 |
+
+### 文件及执行流程
+
+1. `app/api/dependencies.py`：共享登录检查。读取 Cookie→调用 `get_current_user`→把可信当前用户交给路由。`CurrentUser` 是 FastAPI 的依赖注入声明，不是前端请求字段；OpenAPI 会标出 Cookie 认证。
+2. `app/api/chat_sessions.py`：新建、列表、重命名、历史四个路由。前面三个复用 `services/chat_sessions.py`，历史复用 `services/message_history.py`。
+3. `app/api/memory.py`：只调用 `list_profile_memory` 读取 MySQL，不运行 Agent、不更新记忆，也不提供记忆修改接口。
+4. `app/api/security.py`：提取通用来源/查询参数/JSON/正文边界检查供账号和资源接口复用。新建和 PATCH 要求可信 Origin、application/json；三个 GET 不接受正文；这五个接口不接受任何查询参数，包括前端指定 user_id 或分页参数。正文上限 16 KiB，超限 413；未来聊天正文不能直接沿用此上限。
+5. `app/api/errors.py`：补充 404 SESSION_NOT_FOUND 以及 503 SESSION_UNAVAILABLE、MESSAGE_HISTORY_UNAVAILABLE、MEMORY_UNAVAILABLE 映射。数据库错误不冒充空列表；异常细节不输出。
+6. `app/main.py`：挂载两组新路由；复用应用启动时建立的数据库工厂与运行登记。
+
+所有资源接口都要求登录，身份来自 Cookie，不接受前端指定主人。路径会话 ID 使用既有正整数/BIGINT UNSIGNED 规则，不合法返回 422；ID 在 API 中保持字符串。修改或读取别人会话与读取不存在会话统一返回 404。
+
+历史查询读取应用**同一份** GenerationRegistry；数据库与短锁操作完整放到线程中，不能在异步事件循环直接等待锁。保留原服务的问答顺序、每条问题的生成状态、简短错误和 can_retry。生成结束但收尾尚未完成仍显示忙碌；未登记的 RUNNING 返回 503，不在 GET 中偷偷修复数据。
+
+记忆属于用户，不属于会话：按 updated_at DESC、memory_id DESC 返回本人摘要，只公开 memory_id、memory_type、summary、updated_at，不公开内部 memory_key 或 user_id。查看不会重新提取记忆。新建会话、列表、重命名也都不调用模型。
+
+### 手动验证顺序
+
+沿用上面的后端启动命令，在 `/docs` 中先登录，保持同一主机地址（不要在 localhost 与 127.0.0.1 之间切换 Cookie）：
+
+1. 在 Chat sessions 下 POST `{}`，记下返回的 session_id。
+2. GET 列表，应看到新会话；PATCH 标题，再 GET 确认。
+3. GET 该会话 messages，新会话是空列表；已有终端聊天会话会返回实际保存的问答。
+4. 在 Profile memory 下 GET，本账号有已保存记忆则返回摘要，没有则 `items: []`。
+5. 退出后再查询应为 401；另一个账号尝试读取/改名原账号会话应为 404。
+
+这些操作会实际创建/修改项目会话，但不调用模型。前端页面仍未实现；`can_retry` 返回 true 只代表业务上允许，HTTP 重试路由本轮尚未接入。
+
+自动测试新增 `tests/test_resource_http.py` 和 `scripts/resource_http_mysql_cases.py`，后者已加入原临时 MySQL 验收器；测试覆盖两用户隔离、历史完整问答、旧失败不允许重试、错误摘要过滤、共享忙碌状态、记忆排序和只读性。仅向隔离测试库写入样例，结束清理自己的记录与临时容器，不访问项目库或模型。
+
+本轮新增 17 项离线与 6 项隔离 MySQL 测试。完整 420 项离线、148 项隔离 MySQL 测试通过，迁移重复升级和回退再升级也通过；临时容器已清理。
+
+## 发送消息与失败重试 SSE 接口
+
+2026-10-11：最后两个 POST 已接通，11 个业务接口全部具备后端入口；不增加订阅接口、数据库表或依赖。
+
+| 方法与路径 | 请求体 | 行为 |
+|---|---|---|
+| `POST /api/v1/chat/sessions/{session_id}/messages` | `client_message_key` UUID、`content` | 接受新问题后流式回答；同键同正文重发返回 JSON 回执 |
+| `POST /api/v1/chat/sessions/{session_id}/messages/{message_id}/retry` | `failed_attempt_id` UUID | 只重试最后一个失败问题，复用原 USER；重复重试返回 JSON 回执 |
+
+### SSE 用人话说
+
+SSE = Server-Sent Events，服务器发送事件。仍然是 HTTP 请求，只是响应不必一次全部返回：保持连接，把新内容按事件连续发给浏览器。不是每个字重新发一次请求，也不等于 WebSocket。
+
+本项目的分工是：Deep Agents 组织模型与工具执行；执行器产生“正在检查记忆”“新增回答文字”“已保存”等事件；SSE 将这些事件送到浏览器；未来 React 根据事件更新页面。SSE 自己不思考、不生成文字。
+
+例如一次请求会依次收到（示意，不代表固定措辞）：
+
+```text
+message_start   已接收问题
+agent_progress  正在检查记忆
+reasoning_delta 模型 API 返回的一段推理文字（不保证每次有）
+message_delta   Python 的列表
+message_delta   可以保存多个元素。
+message_done    完整回答已保存
+```
+
+### 新文件和执行顺序
+
+1. `app/api/chat_messages.py`：验证 Cookie/Schema 后准备发送或重试，按需加载后端模型、tracing 和输入预算，复用 `execute_chat_turn` / `execute_chat_retry`。账号与只读查询不要求模型配置；配置不合法时在保存问题前返回安全的 503。新发送/重试共用应用的用户生成限流器与 GenerationRegistry。
+2. `app/api/sse.py`：把六种公开事件编码成 `event: 名称` 与 `data: JSON`，以空行分隔。JSON 转义正文换行，不能借正文伪造事件。不转发工具参数、完整 Agent state 或记忆快照。
+3. `api/security.py`：复用来源、JSON 和查询参数检查，聊天两个 POST 的原始请求体上限为 256 KiB（允许 20,000 字符的 Unicode/JSON 转义）；Schema 仍限制正文 20,000 字符、拒绝空白或额外模型/用户字段。不是扩大模型 token 预算。
+4. `api/errors.py`：补准入的 404/409/422/429/503 映射，429 带 Retry-After；`main.py` 注册路由，并在关闭数据库/进程锁前取消、等待仍活跃的 SSE 请求收尾。
+
+### 流与错误的约定
+
+- 执行器在响应生命周期中运行，不使用遗留的后台生成任务。等到 `message_start` 才发 SSE 响应头，因此准入失败仍返回正常 HTTP 错误 JSON；重复请求返回 `200 application/json`，不再次调用模型。
+- SSE 响应带 `Content-Type: text/event-stream; charset=utf-8`、`Cache-Control: no-cache, no-store`、`X-Accel-Buffering: no`。无 Content-Length，15 秒无事件时可发 `: ping` 注释心跳。部署代理还必须关闭响应缓冲/压缩缓冲，设置足够的读取超时。
+- 公开事件队列最多 8 条；消费者慢会让生产者等待，单次网络写入超过 15 秒则取消并收尾，避免无限积压。业务的默认 120 秒生成超时仍有效。
+- 检测到断线会取消执行器，等待模型关闭、在途事务结束及最终状态核对；只有确认安全后才释放本会话占用。关闭服务器也先等待这些清理，再释放进程锁。
+- 已确认保存才发送 `message_done`；已确认失败才发送 `message_error`，其中 request_id 与响应头一致。中途结算无法确认时只结束流，不伪造失败或成功；收到 EOF 却没有 done/error，前端必须查询历史，不能立即自动重试。
+- 不支持 SSE 断点续传。断线也可能发生在保存成功之后，历史记录才是最终依据。没有新增公开“重新生成成功回答”接口。
+
+前端需要 `fetch` 发 POST 并读取 `response.body`；原生 EventSource 发 GET，不用于本项目。先看 Content-Type 区分错误/重复 JSON 与 SSE。网络块不等于事件：正确前端必须增量 UTF-8 解码、保留不完整片段，并按空行分隔事件。思考文字与回答分别显示，进度用真实事件，不自行编造。
+
+### 手动观察流（会调用真实模型并消耗余额）
+
+先启动后端，在同一个浏览器的 `/docs` 登录并创建会话。随后在该页面的浏览器开发者控制台运行下面代码，将 `42` 换为自己的会话编号。不需要复制 Cookie 或 API Key。
+
+```javascript
+const sessionId = '42';
+const controller = new AbortController();
+const response = await fetch(`/api/v1/chat/sessions/${sessionId}/messages`, {
+  method: 'POST', credentials: 'same-origin', signal: controller.signal,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ client_message_key: crypto.randomUUID(), content: 'Explain Python lists briefly.' }),
+});
+if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream')) {
+  console.log(await response.json());
+} else {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    console.log(decoder.decode(value, { stream: true }));
+  }
+  console.log(decoder.decode());
+}
+```
+
+这只是观察原始网络文字的演示，不是正式事件解析器或聊天 UI。再次运行会生成新的消息键，是新的付费提问；网络重发应复用原键。重试需先 GET 历史，取最后失败 USER 的 message_id 与 generation.attempt_id，再 POST `{failed_attempt_id: ...}` 到重试路径。已保存成功的回答不能重试。开启 LangSmith 时正式调用沿用原 tracing 配置，可能上传输入与输出；不需要上传时关闭 LANGSMITH_TRACING。
+
+测试：`tests/test_chat_sse.py` 验证真正逐段 ASGI 发送、心跳、限流/错误/重复回执、慢连接、断线、重复取消及 shutdown 清理；`scripts/chat_sse_mysql_cases.py` 使用真实 Deep Agents 图、假供应商流和隔离 MySQL，验证保存、失败重试、跨用户拒绝和断线清理。没有调用真实供应商或上传 trace，不能将其当作真实模型/浏览器部署验收。
+
+本轮新增 17 项离线测试、5 项隔离 MySQL 测试；完整 437 项离线、153 项 MySQL 测试及迁移往返验证通过。临时测试容器和数据已清理。
+
+参考：[MDN SSE 说明](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)。
 
 ## 终端真实聊天入口
 
@@ -46,8 +215,8 @@ uv run python -m app.cli.chat
 
 ### 第一次怎样操作
 
-1. 启动时先只读检查数据库版本、表及 Alembic 版本；不会自动建表或清理旧任务。
-2. 程序显示目标数据库、模型和 LangSmith 开关。确认无误后输入 `y`；直接回车则退出，不创建账号、会话或模型请求。
+1. 启动时先只读检查数据库版本、表及 Alembic 版本；不会自动建表，确认前不清理旧任务。
+2. 程序显示目标数据库、模型、LangSmith 开关及启动清理提示。确认无误后输入 `y`，取得进程锁、再次检查数据库并核对残留状态；清理成功后才进入登录。直接回车则退出，不清理状态、不创建账号、会话或模型请求。
 3. 输入 `r` 注册，按提示填写邮箱、密码、确认密码和昵称；已有账号则输入 `l` 登录。密码输入时不显示字符，是正常现象。注册后通过原有登录业务登录。
 4. 登录成功会创建一个新会话。看到 `You>` 后输入自己的问题并回车，例如“请用中文解释 Python 的列表”。这才会调用真实模型，消耗 API 余额。
 5. 程序分开显示 `[Progress]`、`[Thinking]` 和 `[Answer]`。思考文字仅在模型返回相应字段时出现；不是伪造的进度，也不承诺展示模型全部内部推理。看到 `[Saved]` 表示最终回答已保存。
@@ -57,10 +226,11 @@ uv run python -m app.cli.chat
 |---|---|
 | `/new` | 建立新会话，后续问题使用新的聊天上下文 |
 | `/history` | 查询当前会话已保存的问答和生成状态，不调用模型 |
+| `/memory` | 查询当前用户已保存的 Profile Memory，不调用模型 |
 | `/help` | 显示命令说明 |
 | `/quit` | 撤销本次终端登录并退出，不影响其他设备登录 |
 
-账号、会话和问答写入项目数据库，退出后仍保留。思考和进度只实时显示，不保存到聊天记录。若 LangSmith 已开启，提示、记忆、推理及回答可能上传至所配置的项目；不希望上传时将 `LANGSMITH_TRACING=false`。本工具不打印或保存原始登录凭据到文件，不要把密钥或密码当聊天问题发送。
+账号、会话、问答和符合规则的个人记忆写入项目数据库，退出后仍保留。每个问题最多一次非思考的记忆判断模型调用，加一次正式思考/回答调用；重复消息回执不重新调用，命中本地敏感规则则跳过记忆模型。相较之前普通聊天通常增加一次模型请求和等待时间。思考和进度只实时显示，不保存到聊天记录。若 LangSmith 已开启，提示、记忆、推理及回答可能上传至所配置的项目；不希望上传时将 `LANGSMITH_TRACING=false`。本工具不打印或保存原始登录凭据到文件，不要把密钥或密码当聊天问题发送。
 
 ### 与未来网页版的关系
 
@@ -75,11 +245,11 @@ uv run python -m app.cli.chat
 
 ### 使用边界和验证
 
-- 这是本机单进程调试工具。运行前停止使用同一数据库的其他聊天服务或 CLI；虽然两种入口在代码中可以共存，当前内存锁不能协调多个进程。普通 `/health` 页面不是聊天执行进程。
+- 这是本机单进程调试工具。运行前停止使用同一数据库的其他聊天服务或 CLI；两种入口在代码中共存，但现在 FastAPI（即使仅提供 `/health`）和终端都会取得同一项目进程锁，不能同时运行。Vite 前端不持有此锁，可与 FastAPI 同时运行。
 - 登录连续三次凭据错误会退出；生成频率限制重启后重置。尚未实现面向公网的注册/登录/IP 限流，不能把它当完整安全网关。
-- Ctrl+C 会取消当前执行，等待在途数据库操作和资源清理，再退出登录。请等待，不要连续按。强杀进程或数据库不可用仍可能留下未确认状态；此入口不会自动修复或恢复旧生成。
+- Ctrl+C 会取消当前执行，等待在途数据库操作和资源清理，再退出登录。请等待，不要连续按。强杀或数据库不可用仍可能留下未确认状态；旧进程完全退出后的下一次启动会核对残留状态，但不会恢复或重跑模型。运行中数据库故障的自动修复仍未实现。
 - 如果提交结果无法确认，会停止接受新问题并要求 `/history` 核对，不自动换 key 重发或重复调用模型。历史仍忙碌则继续禁止发送；历史查询失败则安全退出。
-- 当前只支持单行输入、新会话和当前会话历史；没有旧会话选择、失败回复重试、重新生成或记忆写入。失败可查看提示后有意发送一个新问题，它不等于重试原消息。
+- 当前支持单行输入、新会话、当前会话历史和 `/memory`；记忆工具已接入，没有旧会话选择、失败回复重试或重新生成。失败可查看提示后有意发送一个新问题，它不等于重试原消息。
 - 自动验收：324 项离线测试、95 项隔离 MySQL 测试通过，包括本次新增的 21 项离线测试和 5 项 MySQL 测试。使用真实 Deep Agents 图和临时 MySQL，但替换供应商网络流、关闭 tracing；不消耗你的 API 余额，不修改项目库。真实供应商的思考输出及 LangSmith 上传需由你按上述命令手动确认。
 
 复查命令（在 `backend/` 中）：
@@ -595,7 +765,7 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 本节输入组装完成时尚未创建正式 Deep Agent。2026-10-09 已补上下节的 Agent 工厂、只读记忆后端和最终请求预算保护；当前正式工具清单仍为空，未来启用工具时需要同步调整实际工具定义及预算计算。框架预留不是已经测量过的默认工具开销。**保守估算不等于供应商精确 tokenizer，也不能保证供应商最终编码永远不超窗。** 不向用户开放默认文件工具/子 Agent，不启用自动历史摘要。
 
-当前函数用于新消息，失败重试仍未实现；未来重试必须复用预算规则，但从原 USER 取问题并排除该问题自身，不能把重试伪装成一条新问题。正式 Agent 与最终回复保存已在后续章节接上；终端已接单进程生成限流，记忆写入工具和 HTTP/SSE 仍未实现。
+当前输入组装已供新发送和失败重试共用。重试从原 USER 取问题，通过 retry_message_id 排除该问题自身，再完整加入一次；不把重试伪装成新消息。正式 Agent 与最终回复保存已接上；终端已接单进程生成限流和独立记忆阶段，HTTP/SSE 仍未实现。
 
 ### 验证
 
@@ -620,7 +790,7 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 ### 工具和容量保护
 
-当前是“只读已有记忆并回答”的阶段，没有记忆写入工具。框架的 memory 能力会读取后端并将记忆作为受限数据注入提示；不是仅由项目把 Profile 手工拼接到用户问题。[官方 Memory 说明](https://docs.langchain.com/oss/python/deepagents/memory)
+本工厂负责“只读已有记忆并回答”，没有写入工具；写入已在回答前的独立记忆阶段实现。回答阶段的框架 memory 能力会读取后端并将记忆作为受限数据注入提示；不是仅由项目把 Profile 手工拼接到用户问题。[官方 Memory 说明](https://docs.langchain.com/oss/python/deepagents/memory)
 
 `tools=[]`、`subagents=[]` 本身不足以关闭所有框架默认工具。实际保护由中间件实施：交给模型前清空工具清单；模型意外返回工具调用时报安全错误；工具执行入口也统一拒绝，包括 `task` 委派。框架内部仍可能构建默认子 Agent/工具节点，但没有允许执行它们的路径。另用 `ModelCallLimitMiddleware(run_limit=1, exit_behavior="error")` 限制本次回答的模型调用次数；将来加入保存记忆工具时必须显式调整这些限制并补测试，不能直接挂工具就宣称可用。
 
@@ -649,7 +819,7 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 1. 在线程中进入已有 `accept_user_message`：验证归属、查重、检查预算/额度、准备历史和记忆快照、提交 USER/RUNNING。重复请求返回回执，不创建 Agent、不发送新流。
 2. 发 `message_start`、`agent_progress: context_ready`。此时数据库事务和短锁已经结束，不会一直持锁等待模型。
-3. 创建正式 Deep Agent，发 `agent_running`，开始 `agent.astream`。通过 `metadata["langgraph_node"]` 只接收主模型文字。模型可用 API 推理字段不是完整内部状态，不能把任意节点内容都展示给用户。
+3. 先执行独立记忆阶段，发记忆检查/保存/跳过等真实进度；内部模型文字和工具参数不显示。再创建正式回答 Deep Agent，发 `agent_running`，开始 `agent.astream`。通过 `metadata["langgraph_node"]` 只接收回答模型文字。模型可用 API 推理字段不是完整内部状态，不能把任意节点内容都展示给用户。
 4. 收到推理就发 `reasoning_delta`；收到正文就发 `message_delta`。首次收到对应片段时分别发 `thinking`、`answering` 进度。没有推理就不伪造思考文字；当前没有搜索/工具执行，也不会谎称搜索中。
 5. 等整个图正常退出，并验证 finish_reason=stop、正文非空。发 `saving`，在同一事务中保存完整 ASSISTANT 和 USER 的 SUCCEEDED。
 6. 关闭执行资源、核对数据库并释放仍属于本次 attempt 的会话占用，最后发 `message_done`。模型失败则保存 FAILED 并发 `message_error`。断线消费者抛错或调用方取消时，完成清理再传播异常，不继续向断开的客户端发事件。
@@ -660,12 +830,12 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 思考文字与工作进度都只用于本次事件流，不写进 `messages.content`，不进入下轮上下文，刷新后不恢复；数据库不增加列或迁移。正式回答仍持久化。启用 LangSmith 时，模型提示、记忆、推理和回答可能另外上传到 tracing 服务，不应把“不入聊天表”误解为“绝对不在任何地方留存”。
 
-当前无工具请求不回传旧推理；将来添加记忆写入工具时，必须按供应商规则补推理回传与预算，不能仅解除工具拦截。[DeepSeek 官方说明](https://api-docs.deepseek.com/guides/thinking_mode/)
+回答阶段仍无工具，不回传旧推理；记忆阶段单独关闭思考且不带历史助手消息，工具输出不进入回答图。这样不依赖保存历史 reasoning_content，详见“两阶段执行”；不能直接在原回答图上解除工具拦截。[DeepSeek 官方说明](https://api-docs.deepseek.com/guides/thinking_mode/)
 
 ### 安全边界与验证
 
 - 只有当前占用与数据库 attempt 都匹配、且状态为 RUNNING，才能首次保存结果；FAILED 的迟到回答拒绝，已成功提交不再重复插入。
-- 保存事务返回异常时，用新事务锁定父会话核对：已成功则返回成功；未提交则记录失败；数据库无法核对则保留占用并报安全业务异常，不谎称空闲。启动/长期故障后的自动修复仍未实现。
+- 保存事务返回异常时，用新事务锁定父会话核对：已成功则返回成功；未提交则记录失败；数据库无法核对则保留占用并报安全业务异常，不谎称空闲。启动核对已接入；运行中长期数据库故障的自动修复仍未实现，应停止旧进程后再启动核对。
 - 默认 120 秒从准入成功后开始，包含模型、事件消费及结果保存；同步事务取消不等于线程停止，因此必须等待实际事务与清理结束，总耗时可能超过 120 秒。
 - 事件消费者应快速接收并遵守背压，不能无限缓存；未来 HTTP 层需在断线时取消执行协程。最终事件发送失败不回滚已保存回答，重连后查历史确认。
 - 303 项离线测试通过；90 组真实 MySQL 8.4.11 验收通过，新增 12 组涵盖两轮上下文、思考不入库、重复/并发/隔离、超时取消、提交前后故障、取消发生在 USER/ASSISTANT 提交期间及迟到结果拒绝。MySQL 测试使用真实 Deep Agents 图，供应商网络部分由假流替换。
@@ -679,11 +849,11 @@ uv run python -m unittest discover -s tests -q
 uv run python scripts/check_migration_mysql.py
 ```
 
-这一步结束后，仍需补失败重试、记忆写入/查询业务、HTTP 账号/IP 限流、启动清理，以及 HTTP/SSE 和聊天网页。终端已接单进程生成限流。实际供应商的正式思考流与 LangSmith 上传尚需另外联调，不能把本地假流测试当成已验证真实云端效果。
+后续已补记忆存取、独立记忆阶段、失败重试业务及启动清理，仍需补 HTTP 账号/IP 限流，以及 HTTP/SSE 和聊天网页。终端已接单进程生成限流，但尚无 `/retry` 命令。实际供应商的记忆提取、正式思考流与 LangSmith 上传仍需手动联调，不能把本地假流测试当成已验证真实云端效果。
 
 ## 个人记忆保存与查询业务
 
-本次只完成记忆存取服务，没有启用 Agent 自动提取或记忆工具，没有新增 HTTP 路由、CLI 命令、表或迁移。终端里说“记住我喜欢中文”目前仍不会自动写入记忆；下一步才接模型工具。
+本节记录先前完成的记忆存取服务；后续已接入 Agent 记忆阶段与 `/memory`，见下一节。服务层本身不调用模型，不新增表、迁移或 HTTP 路由。
 
 ### 按编写顺序学习
 
@@ -704,7 +874,7 @@ ProfileFact(memory_key="preference.language", summary="喜欢用中文解释")
 
 这里的摘要必须是调用方已经审核、合并后的完整主题值。例如原来是“使用 Git”，用户补充 Docker 时，调用方应该提交“使用 Git 和 Docker”，不能只提交“使用 Docker”导致旧事实丢失。存储层不调用 LLM，无法自行判断自然语言是补充、纠正、临时要求还是敏感信息，也不声称实现了语义过滤。
 
-下一步接工具时，必须落实明确陈述、敏感信息排除、原摘要合并及模型工具参数限制；只开放受控的记忆写入工具，不能直接把此服务当作可任意写入的公开接口。现有 Agent 工厂仍禁止工具调用，调用次数/工具预算与供应商推理回传也需要届时一起调整。
+后续接入的记忆阶段通过提取提示、原话引用校验和保守敏感规则落实限制，仍不能把这些措施等同于完备的语义/隐私分类器。只开放受控的记忆写入工具，不能直接把此服务作为公开写接口。正式回答工厂仍禁止工具调用；记忆阶段的独立工具预算和调用限制见下一节。
 
 ### 事务、并发和失效保护
 
@@ -722,6 +892,155 @@ uv run python -m unittest discover -s tests -p 'test_profile_memory.py' -v
 ```
 
 真实数据库验收仍用 `uv run python scripts/check_migration_mysql.py`，只操作脚本创建的临时容器。覆盖新增/更新/不重复、用户隔离、稳定排序、不同主题和同主题并发、跨会话读取、整批回滚、提交确认丢失、失效尝试拒绝。本次新增 14 项离线测试、9 项 MySQL 测试；全套共 338 项离线测试和 104 项 MySQL 测试通过，临时容器及其测试数据已清理。测试不调用模型、不修改项目库。
+
+## Agent 自动记忆：两阶段执行
+
+### 自己怎样试
+
+仍用 `uv run python -m app.cli.chat`。登录后逐行输入：
+
+```text
+请记住：以后回答我时优先使用中文，并先讲用途，再解释代码。
+/memory
+/new
+Explain a Python dictionary.
+/memory
+```
+
+看 `[Progress] Profile memory save confirmed.` 和 `/memory` 的实际条目来确认保存，不只相信 AI 回答中的“记住了”。新会话应能读取同一用户的已有偏好；是否遵循偏好仍受模型输出影响。若没有条目，查看进度是跳过还是无法确认；可以用更明确的长期偏好再试，不要用密码或其他敏感资料测试。
+
+本步骤没有自动访问你的项目数据库、真实模型或 LangSmith；下面描述的是接线与本地测试结果，真实模型提取质量仍需这次手动联调。
+
+### 新文件及接入顺序
+
+1. `app/agent/profile_memory_tool.py`：定义工具输入（主题、合并后的摘要、当前消息中的原话引用）、提取提示与敏感规则，创建只属于本次执行的 `BoundMemoryTool`。模型只见 `facts`，看不到也不能提供 user_id、Session factory、registry 或 attempt_id。工具通过已有 `save_profile_facts` 服务提交；确认成功才记录 saved。
+2. `app/agent/memory_workflow.py`：用 `create_deep_agent` 建立一次短的记忆阶段。模型关闭思考，只收到当前用户原文和用户已有 Profile；不收到其他会话聊天或原来助手消息。中间件只允许 `save_profile_facts`，拒绝其他工具与多次工具调用。工具使用 `return_direct=True`：工具完成就结束这张图，不再调用模型生成一段确认话。
+3. `app/services/chat_execution.py`：准入完成后，先运行记忆阶段，再运行已有正式回答 Agent；两个阶段使用同一个 attempt/总超时及 tracing 范围。确认保存后读回最新 Profile，传给回答阶段；只把最终回答写进 messages，不把工具参数、内部判断文字、思考或来源引用保存成聊天正文。
+4. `app/schemas/stream.py` 与终端显示：增加 memory_checking / memory_saving / memory_saved / memory_skipped / memory_unavailable 实际进度；CLI 加 `/memory` 调用已有查询服务。这不是新增 HTTP API。
+
+### 为什么拆开
+
+[DeepSeek 官方思考模式说明](https://api-docs.deepseek.com/guides/thinking_mode/)对携带工具的思考请求规定了推理内容回传要求。现有历史只保存正式回答，没有保存历史推理和工具轨迹，因此本版不在原聊天图里简单解除工具限制，也不伪造旧 reasoning_content。
+
+记忆阶段关闭思考、没有旧 assistant 消息，最多一次模型调用、一次写入批次；之后正式回答阶段保持思考开启、工具清单为空，继续按历史上下文回答。两个阶段都是 Deep Agents 图，不是开放默认子 Agent 委派，也不新增模型供应商或依赖。记忆模型输出最多 2048 tokens、SDK 超时 20 秒、阶段超时 25 秒；回答保留 4096 输出额度和 SDK 60 秒超时。整体仍受 120 秒执行期限约束；在途数据库事务清理可能使实际退出稍晚。
+
+### 记忆规则与边界
+
+- 提取提示要求只记明确、持续的本人事实；不把临时指令、示例、引用、别人的信息或问过的知识当个人记忆。模型需读旧摘要，保留仍有效的事实，并合并补充/处理明确纠正。原话引用必须确实存在于当前问题，否则整批拒绝。引用匹配只证明文本出现过，不证明模型的语义理解正确。
+- 25 个主题来自共同允许列表；每条摘要最多 500 字符、原话引用最多 1000 字符，每批最多 25 个不同主题。模型不能指定用户、分类或生成身份。敏感关键词/号码模式在原问题及候选摘要上做保守拦截；命中原问题时不调用记忆模型。可能误拒，也可能漏检，不承诺自动识别全部敏感语义；公开给真实用户前仍需隐私告知、控制/删除与更全面评估。
+- 聊天原文仍按原有规则入 messages，回答模型仍读取原问题。跳过长期记忆不等于聊天原文被脱敏；LangSmith 开启时也可能另存请求和工具轨迹。
+- 文件写入、执行命令、搜索和 `task` 等框架工具仍拒绝；不挂载宿主机目录，不开放其他用户数据。
+- 无需记忆就跳过；记忆模型超时、输入超预算或保存无法确认时，不自动重试，给回答阶段一个后端生成的状态提示，尽量继续正常回答。事件消费者断开和执行取消不能被吞成普通记忆错误。
+- 取消不启动后续写入；已开始的短事务等结果确定再退出生成作用域。记忆先提交而后续回答失败，记忆保留。确认丢失时不声称一定保存或一定回滚。若保存成功但读回失败，回答可用旧快照继续，`/memory` 或下一次提问再读真实记录。
+- 记忆请求预算计算实际 system、消息和工具定义；答案仍检查最终实际请求。记忆增长时重新核算输入，从最旧的完整问答开始移除以腾出空间，不截断当前问题，也不删除数据库历史。
+
+### 测试
+
+`tests/test_memory_workflow.py` 使用真实框架和模拟模型；`scripts/memory_workflow_mysql_cases.py` 使用临时 MySQL，验证工具真正写入、跨会话读取、更新不重复、用户隔离、记忆失败后仍回答、回答失败保留已存记忆、重复请求不增加模型调用，以及取消等待在途记忆事务。终端测试验证 `/memory` 先检查身份且不调用模型。
+
+本阶段新增 17 项离线测试、9 项 MySQL 测试；完整 355 项离线测试、113 项隔离 MySQL 测试通过，迁移重复执行及回退再升级验证通过。临时容器和一次性测试数据已清理，没有改动项目数据库、调用真实模型或上传 LangSmith。实际模型是否正确理解补充/纠正仍需手动检查，模拟模型测试不能替代语义质量评估。
+
+```bash
+uv run python -m unittest discover -s tests -p 'test_memory_workflow.py' -v
+uv run python -m unittest discover -s tests -q
+uv run python scripts/check_migration_mysql.py
+```
+
+## 失败重试业务
+
+### 这一步做什么、不做什么
+
+同一个用户问题没有成功得到完整回答时，允许重新执行 Agent。原问题不重复插入，成功回答不能“重新生成”，较早的失败问题也不能重试。本步骤不增加表、迁移、依赖或 API 字段，也没有接 HTTP 路由、网页按钮或终端 `/retry`。
+
+用户问题编号始终相同，变化的是执行编号，例如：
+
+```text
+message_id=42，attempt_id=A：FAILED
+请求重试：message_id=42，failed_attempt_id=A
+接受后：message_id=42，attempt_id=B，retry_of_attempt_id=A，RUNNING
+成功后：问题 42 为 SUCCEEDED，另保存一条指向问题 42 的 ASSISTANT 回答
+```
+
+此时相同的 `failed_attempt_id=A` 请求重复到达，只返回 B 的当前回执，不再调用模型。如果 B 也失败，刷新状态后使用 `failed_attempt_id=B` 才是下一次有意重试。只保留最近一跳的关系，不恢复所有旧请求的历史回执。
+
+### 建议按这个顺序读文件
+
+1. `app/services/message_retry.py`：新建的重试准入服务 `accept_failed_message_retry`。先检查会话归属、消息和最近一跳的重复请求；再检查编号、忙碌、残留 RUNNING、最后一个问题及 FAILED 状态。读取数据库里的原问题，组装输入并执行必填限流检查；在短事务内换新 attempt_id、清空错误、更新活动时间，不改变原文、发送键、创建时间或标题。事务提交、短锁释放后才 `yield` 执行凭据。
+2. `app/services/agent_input.py`：修改已有输入组装函数，增加内部参数 `retry_message_id`，显式排除原问题的历史行；仍只选预算内的成功问答，最后加原问题一次，同时加载本人最新记忆。
+3. `app/services/chat_execution.py`：新增业务入口 `execute_chat_retry`，将共用部分抽为 `_execute_with_scope`。新发送和重试只在“接收请求”时不同，后面共用记忆阶段、回答阶段、思考/进度事件、120 秒总超时、最终保存和取消清理。重复回执不进入两阶段、不发送另一套流。
+4. `app/services/message_submission.py`：扩展已有收尾检查，允许核对重试 UPDATE 失败的两种结果：确实回滚则保留旧 FAILED；已经提交则将未完成的新尝试标记为中断。核对失败时保留忙碌，不能假装可重试。旧尝试结果/记忆写入仍须通过现有运行编号保护，不能影响新尝试。
+5. `app/services/errors.py`：增加 `MESSAGE_NOT_FOUND`、`RETRY_NOT_ALLOWED`、`STALE_GENERATION` 三种安全业务错误；HTTP 状态与统一错误响应留给后续接口层。
+
+`execute_chat_retry` 的调用方必须传已认证用户、应用共享的 registry、Session 工厂、模型/跟踪配置、事件消费者和 `check_retry`。新发送的 `check_new_message` 与 `check_retry` 必须调用同一份 `GenerationRateLimiter.check(user_id)`；真实新生成才计数，重复回执不消耗额度。不能传空限流函数充当生产实现。
+
+所有同步数据库和短锁操作由共享执行器放在线程中处理。取消发生在提交期间时先等该短事务完成，再核对并清理；模型运行时不持有数据库事务或短锁。仍仅支持单进程；启动清理已接入，运行中故障的自动恢复仍待实现。
+
+### 如何验证
+
+- `tests/test_message_retry.py`：离线测试准入规则、安全错误和重复请求不创建模型。
+- `scripts/message_retry_mysql_cases.py`：临时 MySQL 与真实 Deep Agents 图，供应商响应使用替身；验证成功/失败、连续重试、防重复和同时准入、用户/会话隔离、旧结果/旧记忆写入拒绝、原问题只进入上下文一次、记忆更新不重复、超时/取消、提交前回滚与提交后确认丢失。
+- `scripts/check_migration_mysql.py`：接入上述真实数据库测试，创建并清理独立临时容器，不使用项目数据库；不调用真实模型、不上传 LangSmith。
+
+本步骤新增 12 项离线测试和 15 项隔离 MySQL 测试；完整 367 项离线、128 项真实 MySQL 测试通过，重复迁移及回退再升级验收通过。测试容器与一次性数据已清理，项目数据库未改动。真实模型效果与 HTTP/网页端到端验收不包含在这些测试中。
+
+从 `backend/` 运行：
+
+```bash
+uv run python -m unittest discover -s tests -p 'test_message_retry.py' -v
+uv run python -m unittest discover -s tests -q
+uv run python scripts/check_migration_mysql.py
+```
+
+最后一条需要 Docker 运行，包含真实建表、约束和业务测试；删除的仅是脚本本次创建的临时容器与一次性测试数据。
+
+## 启动清理：避免永久显示正在生成
+
+### 用人话理解
+
+假设 Agent 回答到一半，后端被强行关闭：模型任务已经没了，但数据库里的问题仍可能是 `RUNNING`。启动清理不是删聊天，而是在下一次启动、开始处理请求之前核对这些旧状态。
+
+- 没有保存最终 ASSISTANT 回答：原 USER 改为 `FAILED / GENERATION_INTERRUPTED`，可以按既有规则重试最后一个失败问题。
+- 已存在同会话、正确关联且非空的最终 ASSISTANT 回答：保留回答，修正 USER 为 `SUCCEEDED`，清空错误。
+- 原本是 `SUCCEEDED` 或 `FAILED`：不修改。
+- 回答跨会话、空白、编号不合法等异常：停止启动，不猜测结果。
+
+清理只更新残留 USER 的生成状态、错误和 `updated_at`。不删除记录，不调用模型，不改变问题正文、创建时间、执行编号、前驱编号、标题或会话活跃排序，也不改变登录和长期记忆。不恢复中途 checkpoint，不自动重试。
+
+### 文件和方法
+
+1. `app/core/runtime_lock.py`：`RuntimeLock` 使用 macOS/Linux 的操作系统文件锁，位于 `backend/.runtime/chat.lock`。它表示“这个项目已经有一个聊天进程在运行”。锁从启动前一直持有到正常退出，进程崩溃时由操作系统释放。锁文件内容为空，不是数据库、密码文件或聊天记录；目录已加入 `.gitignore`。文件保留是正常现象，不能通过删除运行中的锁文件强行启动第二个实例。
+2. `app/db/readiness.py`：把原终端里的只读数据库检查移到共用位置，检查 MySQL 8.4+、迁移头和五张表存在，不运行迁移。终端原导入名仍可使用。
+3. `app/services/startup_cleanup.py`：`reconcile_interrupted_generations` 执行实际核对。要求进程锁已持有、共享 GenerationRegistry 空闲；扫描残留 RUNNING，按会话顺序锁父行、再核对问题与回答。在同一事务中提交，避免遇到坏关联时留下半批修改。数据库提交返回成功后才报告修复数量。
+4. `app/core/runtime.py`：`open_backend_runtime` 把进程锁、数据库检查、清理、Session 工厂、共享运行登记和限流器组装起来，再将这些交给服务。它不是新的 Agent 执行器。
+5. `app/main.py`：通过 FastAPI 的 `lifespan`（应用启动和关闭时执行的代码）调用上述运行环境；完成清理后才接受请求。同步数据库检查放在线程中，取消时等待该线程结束后释放资源。`app.state.runtime` 留给后续接口复用共享依赖。仅 import 模块不会读取 `.env`、创建锁文件或访问数据库。
+6. `app/cli/chat.py`：用户确认 `y` 之后进入同一个运行环境；清理成功才登录和聊天，退出聊天及注销登录后才释放锁。终端拒绝确认不会触发清理。
+
+### 安全边界和启动方式变化
+
+- 首次使用新启动逻辑前，必须先停止所有旧版本聊天进程。旧程序没有取得这把锁，不能靠新锁证明它已经退出。
+- 文件锁只协调同一主机、同一项目目录/锁路径的入口。不同目录副本、其他机器、多个容器或绕过启动入口的程序不在保护范围内；禁止它们同时操作同一聊天库。不使用多个 Uvicorn worker，不关闭 lifespan。`--reload` 开发重启也必须等旧子进程退出。
+- 不能只凭一份新建空 registry 判定旧任务不存在。进程锁负责同项目进程互斥；registry 的启动清理屏障另外拒绝本进程已有任务/等待者，并阻止清理期间的新准入。
+- 锁文件是本地运行文件，不加入 Git；不存放在同步盘，不在运行中删除、替换或移动。
+- **FastAPI 现在启动就需要数据库连接和当前迁移版本**。先准备好 MySQL、迁移和 `backend/.env` 的 `DB_*`，再运行 Uvicorn。这里不会调用模型，也不要求仅为 `/health` 加载模型密钥。
+- 启动数据库故障、清理异常或提交结果不能确认时，进程不进入服务阶段，不自动重试或假称数据库未变。提交确认丢失时可能已完成修改；停止进程、恢复数据库后再次启动会重新核对，不会重复调用模型。
+- 第一版数据量少，采用一次事务核对全部残留；数据规模扩大后另行设计分批启动修复。
+- 这不是运行期间的扫描器；当前进程中发生长期数据库故障时先停止并等待执行结束，再重启核对，不能在有存活任务时手动运行清理。
+
+命令不变：终端聊天用 `uv run python -m app.cli.chat`；网页后端用 `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload`，两者选一个运行。成功时显示/记录 interrupted 与 restored successful 的数量，日志不包含问题、答案或凭据。
+
+### 验证范围
+
+`tests/test_startup_cleanup.py` 验证状态规则、进程互斥、子进程崩溃释放锁、启动失败/取消和 FastAPI 生命周期；`scripts/startup_cleanup_mysql_cases.py` 在临时 MySQL 验证真实事务、回滚、提交后确认丢失、状态恢复、重复启动无变化、活任务拒绝、清理后失败重试和 HTTP 启动顺序。终端测试还验证确认前不清理、失败不进入登录。
+
+本次新增 18 项离线测试和 10 项真实 MySQL 测试；完整 385 项离线测试、138 项隔离 MySQL 测试通过，重复迁移及回退再升级通过，临时容器及测试数据已清理。自动验收只使用临时容器及测试模型替身，没有启动你的项目服务、修改项目数据库或发送真实模型/LangSmith 请求。
+
+从 `backend/` 运行：
+
+```bash
+uv run python -m unittest discover -s tests -p 'test_startup_cleanup.py' -v
+uv run python -m unittest discover -s tests -q
+uv run python scripts/check_migration_mysql.py
+```
 
 ## LangSmith 执行跟踪（可选）
 
@@ -793,7 +1112,7 @@ uv run python -m app.agent.check
 
 这次只验证回答，所以在发给模型前隐藏所有工具（仅设置 tools=[] 不会移除框架内置工具）。没有挂载宿主机文件、连接数据库或设置持久化 checkpoint；LangSmith tracing 由上文配置控制，默认关闭。只发送固定测试问题和 Agent 提示，不发送项目文件或数据库内容。工具调用和长期记忆需要后续另外验证。
 
-**终端逐段打印不等于网页 SSE 已完成。** 后面还要让 FastAPI 把这些文字转成 SSE，再让 React 接收并显示。当前网页仍是 /health 检查页面。
+**终端逐段打印不等于网页完成。** FastAPI 的 SSE 现已接通（见“发送消息与失败重试 SSE 接口”），接下来要让 React 接收并显示。当前网页仍是 /health 检查页面。
 
 参考：[DeepSeek 官方调用说明](https://api-docs.deepseek.com/)、[ChatDeepSeek 适配器](https://docs.langchain.com/oss/python/integrations/chat/deepseek)、[Deep Agents 流式输出](https://docs.langchain.com/oss/python/deepagents/streaming)。模型名称以 DeepSeek 官方当前说明为准，适配器文档里的示例名称可能较旧。
 
@@ -810,7 +1129,7 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 - `--reload` 用于开发时修改代码后自动重启，不是生产部署配置。
 - 保持终端运行，用 Ctrl+C 停止。
 
-访问 <http://127.0.0.1:8000/health>，应收到 `{"status":"ok"}`。这个接口只证明 HTTP 应用能响应，不会连接 MySQL 或调用大模型，不代表完整服务依赖已就绪；它不计入 11 个业务接口。
+启动前先准备 MySQL、当前迁移和 `DB_*`，并停止本项目终端聊天。FastAPI 启动会连接数据库核对残留生成状态，成功后才接受请求。访问 <http://127.0.0.1:8000/health>，应收到 `{"status":"ok"}`；这个请求本身不查数据库或调用大模型，只证明 HTTP 应用此时能响应，不代表数据库或模型持续可用。它不计入 11 个业务接口。
 
 前端通过 Vite 开发代理访问同一个接口，启动步骤见 [前端说明](../frontend/README.md)。目前未配置宽泛的 CORS 许可，生产同站点部署时仍需单独配置转发。
 
@@ -820,4 +1139,4 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 uv run python -m unittest discover -s tests -v
 ```
 
-这个健康接口测试不需要先启动服务，也不依赖数据库或模型。现已有注册和登录服务函数，但业务 HTTP 接口仍未接入，不能把 /health 可用等同于网站可注册登录。
+离线健康接口测试注入假的启动环境，不访问数据库或模型；真实启动清理另有隔离 MySQL 验收。四个账号 HTTP 接口已接入，见“账号 HTTP 接口”；前端目前仍只是健康检查页面，不能把后端接口完成等同于登录网页完成。

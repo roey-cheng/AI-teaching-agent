@@ -33,6 +33,12 @@ from agent_input_mysql_cases import AgentInputMySQLTest
 from chat_execution_mysql_cases import ChatExecutionMySQLTest
 from terminal_chat_mysql_cases import TerminalChatMySQLTest
 from profile_memory_mysql_cases import ProfileMemoryMySQLTest
+from memory_workflow_mysql_cases import MemoryWorkflowMySQLTest
+from message_retry_mysql_cases import MessageRetryMySQLTest
+from startup_cleanup_mysql_cases import StartupCleanupMySQLTest
+from account_http_mysql_cases import AccountHTTPMySQLTest
+from resource_http_mysql_cases import ResourceHTTPMySQLTest
+from chat_sse_mysql_cases import ChatSSEMySQLTest
 
 
 def docker(*args, env=None):
@@ -305,7 +311,18 @@ def main():
         ChatExecutionMySQLTest.engine = engine
         TerminalChatMySQLTest.engine = engine
         ProfileMemoryMySQLTest.engine = engine
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(MySQLMigrationTest)
+        MemoryWorkflowMySQLTest.engine = engine
+        MessageRetryMySQLTest.engine = engine
+        StartupCleanupMySQLTest.engine = engine
+        AccountHTTPMySQLTest.engine = engine
+        ResourceHTTPMySQLTest.engine = engine
+        ChatSSEMySQLTest.engine = engine
+        # 全库启动核对先运行，之后业务用例可能刻意留下不一致快照用于错误测试。
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(StartupCleanupMySQLTest)
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(AccountHTTPMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ResourceHTTPMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ChatSSEMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MySQLMigrationTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(RegistrationMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(LoginMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(AuthenticationMySQLTest))
@@ -317,6 +334,8 @@ def main():
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ChatExecutionMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(TerminalChatMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ProfileMemoryMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MemoryWorkflowMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MessageRetryMySQLTest))
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         if not result.wasSuccessful():
             return 1

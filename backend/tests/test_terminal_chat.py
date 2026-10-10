@@ -130,6 +130,16 @@ class ChatLoopTest(unittest.TestCase):
         self.mocks["logout_user"].assert_called_once_with(self.token, "factory")
         self.assertIn("Unknown command", text)
 
+    def test_memory_command_rechecks_user_and_queries_without_model(self):
+        from app.schemas import MemoryListResponse
+        with patch("app.cli.chat.list_profile_memory", return_value=MemoryListResponse(items=[])) as read:
+            code, text = self.run_lines(["/memory", "/quit"])
+        self.assertEqual(code, 0)
+        read.assert_called_once_with(self.user, "factory")
+        self.assertEqual(self.mocks["get_current_user"].call_count, 2)
+        self.execute.assert_not_called()
+        self.assertIn("No saved profile memory", text)
+
     def test_input_preserved_unique_keys_shared_registry_and_real_rate_limit(self):
         async def accepted(*args, **kwargs):
             kwargs["check_new_message"](args[2])
@@ -207,9 +217,10 @@ class TerminalStartupTest(unittest.TestCase):
     def test_declining_does_not_start_chat_or_expose_credentials(self):
         terminal = ScriptTerminal(["n"])
         with patch("app.cli.chat.build_database_engine") as engine, patch("app.cli.chat.check_database_ready"), \
-                patch("app.cli.chat.run_chat") as chat:
+                patch("app.cli.chat.run_chat") as chat, patch("app.cli.chat.open_backend_runtime") as runtime:
             self.assertEqual(launch(terminal, self.database(), model(), tracing()), 0)
             chat.assert_not_called()
+            runtime.assert_not_called()
             engine.return_value.dispose.assert_called_once()
         self.assertNotIn("fake-db-secret", terminal.output.getvalue())
         self.assertNotIn("fake-model-key", terminal.output.getvalue())
@@ -238,7 +249,7 @@ class TerminalStartupTest(unittest.TestCase):
         connection.dialect.name = "mysql"
         connection.dialect.is_mariadb = False
         connection.dialect.server_version_info = (8, 4, 11)
-        with patch("app.cli.chat.MigrationContext") as context, patch("app.cli.chat.inspect") as inspector:
+        with patch("app.db.readiness.MigrationContext") as context, patch("app.db.readiness.inspect") as inspector:
             context.configure.return_value.get_current_heads.return_value = ("20260925_0001",)
             inspector.return_value.get_table_names.return_value = ["users", "auth_sessions", "chat_sessions", "messages", "agent_memory"]
             check_database_ready(engine)
@@ -253,3 +264,27 @@ class TerminalStartupTest(unittest.TestCase):
                 patch("app.cli.chat.Terminal"), patch("app.cli.chat.load_database_settings") as load:
             self.assertEqual(main(), 1)
         load.assert_not_called()
+
+    def test_confirmation_then_cleanup_then_chat_with_shared_runtime(self):
+        terminal = ScriptTerminal(["y"])
+        with patch("app.cli.chat.build_database_engine"), patch("app.cli.chat.check_database_ready"), \
+                patch("app.cli.chat.open_backend_runtime") as scope, patch("app.cli.chat.run_chat", return_value=0) as chat:
+            runtime = scope.return_value.__enter__.return_value
+            runtime.cleanup.interrupted = 2
+            runtime.cleanup.restored_success = 1
+            self.assertEqual(launch(terminal, self.database(), model(), tracing()), 0)
+            chat.assert_called_once_with(terminal, runtime.session_factory, unittest.mock.ANY, unittest.mock.ANY,
+                                         registry=runtime.registry, limiter=runtime.limiter)
+            scope.return_value.__exit__.assert_called_once()
+        self.assertIn("2 interrupted, 1 restored successful", terminal.output.getvalue())
+
+    def test_cleanup_failure_does_not_start_login_or_chat(self):
+        from app.services.errors import StartupCleanupError
+
+        terminal = ScriptTerminal(["y"])
+        with patch("app.cli.chat.build_database_engine"), patch("app.cli.chat.check_database_ready"), \
+                patch("app.cli.chat.open_backend_runtime", side_effect=StartupCleanupError()), \
+                patch("app.cli.chat.run_chat") as chat:
+            self.assertEqual(launch(terminal, self.database(), model(), tracing()), 1)
+            chat.assert_not_called()
+        self.assertIn("Startup failed", terminal.output.getvalue())

@@ -30,5 +30,6 @@ frontend/dist/
 # 后端构建产物
 backend/build/
 backend/dist/
+backend/.runtime/
 
 # uv.lock 和 package-lock.json 后续需要提交，不忽略它们

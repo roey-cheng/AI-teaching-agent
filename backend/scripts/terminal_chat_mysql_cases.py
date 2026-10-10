@@ -53,6 +53,9 @@ class TerminalChatMySQLTest(unittest.TestCase):
         self.model_closed = False
 
         async def provider(_model, messages, **kwargs):
+            if kwargs.get("tools"):
+                yield ChatGenerationChunk(message=AIMessageChunk(content="No update", response_metadata={"finish_reason": "stop"}))
+                return
             self.inputs.append(messages)
             try:
                 yield ChatGenerationChunk(message=AIMessageChunk(content="", additional_kwargs={"reasoning_content": "CLI visible thinking"}))

@@ -1,12 +1,21 @@
 import unittest
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.core.http_config import HTTPSettings
+from app.main import create_app
+from app.services.startup_cleanup import StartupCleanupResult
 
 
 class HealthTest(unittest.TestCase):
     def test_health_returns_ok_without_external_services(self):
+        @contextmanager
+        def fake_runtime():
+            yield SimpleNamespace(cleanup=StartupCleanupResult())
+
+        app = create_app(runtime_factory=fake_runtime, http_settings=HTTPSettings(_env_file=None))
         with TestClient(app) as client:
             response = client.get("/health")
 

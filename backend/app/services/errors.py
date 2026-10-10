@@ -122,3 +122,34 @@ class MemoryUnavailableError(Exception):
 
     def __init__(self):
         super().__init__("Memory operation could not be confirmed. Please refresh before trying again.")
+
+
+class MessageNotFoundError(Exception):
+    code = "MESSAGE_NOT_FOUND"
+
+    def __init__(self):
+        super().__init__("Message not found in this conversation.")
+
+
+class RetryNotAllowedError(Exception):
+    code = "RETRY_NOT_ALLOWED"
+
+    def __init__(self):
+        super().__init__("Only the latest failed question can be retried.")
+
+
+class StaleAttemptError(Exception):
+    code = "STALE_GENERATION"
+
+    def __init__(self):
+        super().__init__("This generation has changed. Refresh the conversation before retrying.")
+
+
+class StartupCleanupError(Exception):
+    code = "STARTUP_CLEANUP_FAILED"
+
+    def __init__(self):
+        super().__init__(
+            "Startup reconciliation could not be confirmed. No chat requests will be accepted. "
+            "Check the database and ensure all previous chat processes have stopped."
+        )
