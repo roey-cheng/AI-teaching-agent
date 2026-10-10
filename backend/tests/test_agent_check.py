@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from pydantic import ValidationError
 
 from app.agent.check import build_probe_agent, main, probe_without_tools, stream_answer, visible_text
-from app.core.config import ModelSettings
+from app.core.config import ModelSettings, TracingSettings
 
 
 def fake_settings(**overrides):
@@ -104,6 +104,7 @@ class AgentCheckTest(unittest.IsolatedAsyncioTestCase):
     async def test_success_and_failure_exit_codes(self):
         for failure in (None, TimeoutError("fake-secret"), RuntimeError("fake-secret")):
             with patch("app.agent.check.load_model_settings"), patch("app.agent.check.build_probe_agent"), \
+                    patch("app.agent.check.load_tracing_settings", return_value=TracingSettings(_env_file=None, tracing=False, api_key=None)), \
                     patch("app.agent.check.stream_answer", new_callable=AsyncMock) as stream, \
                     redirect_stdout(io.StringIO()) as output:
                 stream.return_value = 2

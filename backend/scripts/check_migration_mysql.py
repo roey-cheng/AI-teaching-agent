@@ -30,6 +30,9 @@ from chat_session_mysql_cases import ChatSessionMySQLTest
 from message_history_mysql_cases import MessageHistoryMySQLTest
 from message_submission_mysql_cases import MessageSubmissionMySQLTest
 from agent_input_mysql_cases import AgentInputMySQLTest
+from chat_execution_mysql_cases import ChatExecutionMySQLTest
+from terminal_chat_mysql_cases import TerminalChatMySQLTest
+from profile_memory_mysql_cases import ProfileMemoryMySQLTest
 
 
 def docker(*args, env=None):
@@ -299,6 +302,9 @@ def main():
         MessageHistoryMySQLTest.engine = engine
         MessageSubmissionMySQLTest.engine = engine
         AgentInputMySQLTest.engine = engine
+        ChatExecutionMySQLTest.engine = engine
+        TerminalChatMySQLTest.engine = engine
+        ProfileMemoryMySQLTest.engine = engine
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(MySQLMigrationTest)
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(RegistrationMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(LoginMySQLTest))
@@ -308,6 +314,9 @@ def main():
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MessageHistoryMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MessageSubmissionMySQLTest))
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(AgentInputMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ChatExecutionMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(TerminalChatMySQLTest))
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(ProfileMemoryMySQLTest))
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         if not result.wasSuccessful():
             return 1

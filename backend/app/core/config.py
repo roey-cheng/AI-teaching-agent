@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 根据代码的位置找到 backend/.env，不依赖终端当前在哪个目录。
@@ -75,3 +75,46 @@ class ModelSettings(BaseSettings):
 
 def load_model_settings() -> ModelSettings:
     return ModelSettings()
+
+
+class TracingSettings(BaseSettings):
+    """LangSmith tracing 配置；读取配置不上传记录，默认关闭。"""
+
+    model_config = SettingsConfigDict(
+        env_file=BACKEND_ENV_FILE, env_file_encoding="utf-8", env_prefix="LANGSMITH_",
+        extra="ignore", hide_input_in_errors=True,
+    )
+
+    tracing: bool = False
+    api_key: SecretStr | None = None
+    project: str = Field(default="ai-teaching-agent-dev", min_length=1)
+    endpoint: Literal["https://api.smith.langchain.com", "https://eu.api.smith.langchain.com"] = (
+        "https://api.smith.langchain.com"
+    )
+    workspace_id: str | None = None
+
+    @field_validator("api_key", "workspace_id", mode="before")
+    @classmethod
+    def empty_optional_value(cls, value):
+        return None if value == "" else value
+
+    @field_validator("project")
+    @classmethod
+    def project_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("LANGSMITH_PROJECT must not be blank or padded with whitespace")
+        return value
+
+    @model_validator(mode="after")
+    def validate_tracing_key(self):
+        if self.tracing and self.api_key is None:
+            raise ValueError("LANGSMITH_API_KEY is required when tracing is enabled")
+        if self.api_key is not None:
+            raw = self.api_key.get_secret_value()
+            if not raw or any(character.isspace() for character in raw):
+                raise ValueError("LANGSMITH_API_KEY must not contain whitespace")
+        return self
+
+
+def load_tracing_settings() -> TracingSettings:
+    return TracingSettings()

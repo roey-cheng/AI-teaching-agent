@@ -31,7 +31,64 @@
 
 以上库还会自动安装它们所需的其他依赖，包括 LangGraph。安装了模型相关库不代表已经选定模型提供方，也不会自动调用模型。
 
-MySQL 驱动、SQLAlchemy 和 Alembic 已安装，数据库配置读取和独立连接检查代码已编写。目前五张业务表模型、迁移、API Schema、账号、会话和只读历史业务已有离线/隔离 MySQL 验证，用户已报告项目库建表成功。已有最小单进程运行登记、消息准入与 USER 保存、防重和中断清理；新增输入组装与准入前的保守预算检查。执行期预算保护、限流、Agent 执行、重试、启动残留清理、HTTP/SSE、Cookie 和网页尚未接入。本次没有连接或修改项目数据库，也没有调用模型。
+MySQL 驱动、SQLAlchemy 和 Alembic 已安装，五张表模型、迁移、API Schema、账号/会话/历史业务已有测试，用户已报告项目库建表成功。已有运行登记、消息准入、防重、输入组装、正式 Deep Agents 和只读记忆适配。2026-10-11 增加新消息异步执行器及终端聊天入口：支持思考/进度事件、最终回答保存、超时取消、迟到结果保护与单进程生成限流。随后补充记忆存取服务，最新 338 项离线测试、104 项隔离 MySQL 测试通过；详见“个人记忆保存与查询业务”。Agent 记忆提取/写入工具、失败重试、启动残留清理、HTTP/SSE、Cookie 和网页尚未接入。本次自动测试未调用真实模型或 LangSmith，也未连接或修改项目数据库。
+
+## 终端真实聊天入口
+
+在自己的交互终端中运行（不是把账号密码写进命令行）：
+
+```bash
+cd /Users/roey/projects/AI-teaching-agent/backend
+uv run python -m app.cli.chat
+```
+
+前提：Docker 中的项目 MySQL 已运行，项目迁移已完成，`backend/.env` 的数据库和模型配置已填写。无需启动 Uvicorn、Vite 或浏览器；也不需要安装新依赖。只看帮助可以运行 `uv run python -m app.cli.chat --help`。
+
+### 第一次怎样操作
+
+1. 启动时先只读检查数据库版本、表及 Alembic 版本；不会自动建表或清理旧任务。
+2. 程序显示目标数据库、模型和 LangSmith 开关。确认无误后输入 `y`；直接回车则退出，不创建账号、会话或模型请求。
+3. 输入 `r` 注册，按提示填写邮箱、密码、确认密码和昵称；已有账号则输入 `l` 登录。密码输入时不显示字符，是正常现象。注册后通过原有登录业务登录。
+4. 登录成功会创建一个新会话。看到 `You>` 后输入自己的问题并回车，例如“请用中文解释 Python 的列表”。这才会调用真实模型，消耗 API 余额。
+5. 程序分开显示 `[Progress]`、`[Thinking]` 和 `[Answer]`。思考文字仅在模型返回相应字段时出现；不是伪造的进度，也不承诺展示模型全部内部推理。看到 `[Saved]` 表示最终回答已保存。
+6. 再发一条问题可验证多轮上下文；输入 `/history` 从 MySQL 读取当前会话，输入 `/quit` 退出。
+
+| 命令 | 用途 |
+|---|---|
+| `/new` | 建立新会话，后续问题使用新的聊天上下文 |
+| `/history` | 查询当前会话已保存的问答和生成状态，不调用模型 |
+| `/help` | 显示命令说明 |
+| `/quit` | 撤销本次终端登录并退出，不影响其他设备登录 |
+
+账号、会话和问答写入项目数据库，退出后仍保留。思考和进度只实时显示，不保存到聊天记录。若 LangSmith 已开启，提示、记忆、推理及回答可能上传至所配置的项目；不希望上传时将 `LANGSMITH_TRACING=false`。本工具不打印或保存原始登录凭据到文件，不要把密钥或密码当聊天问题发送。
+
+### 与未来网页版的关系
+
+终端负责“读键盘、显示文字”，以后网页负责“接收 HTTP 请求、发送 SSE”。两者都调用同一个 `execute_chat_turn`，复用身份检查、消息保存、历史组装、Deep Agents 与最终回复保存，不另建一套聊天业务。此入口没有修改前端，也没有新增 HTTP 接口；终端打印不等于网页 SSE 已实现。
+
+### 本次编写顺序和文件用途
+
+1. `app/cli/__init__.py`、`app/cli/terminal.py`：建立终端模块；封装隐藏密码输入、安全文字显示和结构化事件的逐段打印。`message_done` 只显示保存结果，不重复打印整篇答案。
+2. `app/services/generation_limit.py`：提供真实的准入检查，每用户在本进程滚动 60 秒最多接受 10 个新问题；`services/errors.py` 增加安全限流错误。准入时查重、忙碌或预算检查拒绝的请求不计数；计数后提交失败保守保留额度。
+3. `app/cli/chat.py`：组合已有业务。启动检查 → 确认真实调用 → 注册/登录 → 新建会话 → 读取问题 → 调用执行器 → 显示事件 → 退出登录。使用同一个 `asyncio.Runner` 执行多轮异步聊天；等待键盘时没有模型在后台生成。
+4. `tests/test_terminal_chat.py`、`tests/test_generation_limit.py`：验证命令、输入、事件显示、频率限制、错误和取消；`scripts/terminal_chat_mysql_cases.py` 加入现有隔离 MySQL 验收入口，验证实际登录、问答入库、多轮上下文和退出清理。
+
+### 使用边界和验证
+
+- 这是本机单进程调试工具。运行前停止使用同一数据库的其他聊天服务或 CLI；虽然两种入口在代码中可以共存，当前内存锁不能协调多个进程。普通 `/health` 页面不是聊天执行进程。
+- 登录连续三次凭据错误会退出；生成频率限制重启后重置。尚未实现面向公网的注册/登录/IP 限流，不能把它当完整安全网关。
+- Ctrl+C 会取消当前执行，等待在途数据库操作和资源清理，再退出登录。请等待，不要连续按。强杀进程或数据库不可用仍可能留下未确认状态；此入口不会自动修复或恢复旧生成。
+- 如果提交结果无法确认，会停止接受新问题并要求 `/history` 核对，不自动换 key 重发或重复调用模型。历史仍忙碌则继续禁止发送；历史查询失败则安全退出。
+- 当前只支持单行输入、新会话和当前会话历史；没有旧会话选择、失败回复重试、重新生成或记忆写入。失败可查看提示后有意发送一个新问题，它不等于重试原消息。
+- 自动验收：324 项离线测试、95 项隔离 MySQL 测试通过，包括本次新增的 21 项离线测试和 5 项 MySQL 测试。使用真实 Deep Agents 图和临时 MySQL，但替换供应商网络流、关闭 tracing；不消耗你的 API 余额，不修改项目库。真实供应商的思考输出及 LangSmith 上传需由你按上述命令手动确认。
+
+复查命令（在 `backend/` 中）：
+
+```bash
+uv run python -m unittest discover -s tests -q
+# 要求 Docker 已启动，已有 mysql:8.4 镜像；只创建和清理专用临时测试容器。
+uv run python scripts/check_migration_mysql.py
+```
 
 ### 第一张表模型：users
 
@@ -135,7 +192,7 @@ Database connection successful: SELECT 1 returned 1; connection closed.
 uv run python -m unittest discover -s tests -v
 ```
 
-当前共 244 项离线测试通过（本次新增 19 项输入组装与预算测试）。覆盖 /health、数据库与模型探针、五张 ORM 表模型、SQLAlchemy 连接检查、全部 API Schema、迁移及已实现业务。这些测试使用虚构配置、模拟调用、离线 SQL 编译或本地哈希计算，不访问真实数据库或模型，也不产生 API 费用。应用模块导入不会自动读取配置或连接数据库；Alembic 在线命令会连接数据库。/health 的行为保持不变。
+当前共 267 项离线测试通过（2026-10-09 新增 23 项正式 Agent、只读记忆和调用前保护测试）。覆盖 /health、数据库与模型探针、五张 ORM 表模型、SQLAlchemy 连接检查、全部 API Schema、迁移及已实现业务。这些测试使用虚构配置、模拟调用、离线 SQL 编译或本地哈希计算，不访问真实数据库或模型，也不产生 API 费用。新增测试使用真实 Deep Agents 图搭配本地假模型，并将真实 DeepSeek 适配器的模型调用替换为测试返回值验证接线。应用模块导入不会自动读取配置或连接数据库；Alembic 在线命令会连接数据库。/health 的行为保持不变。
 
 参考：[Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)、[PyMySQL 连接参数](https://pymysql.readthedocs.io/en/latest/modules/connections.html)。
 
@@ -225,7 +282,7 @@ uv run alembic upgrade head --sql
 backend/.venv/bin/python backend/scripts/check_migration_mysql.py
 ```
 
-当前有 244 项离线测试，真实验收共 78 组（本次新增 8 组输入组装/预算/隔离测试）。已验证 USER 保存及准入前的输入组装，但不代表完整聊天可用；执行期预算保护、限流、模型执行、ASSISTANT 保存业务、重试、迟到结果写入保护、启动/故障后自动核对仍待实现。初次隔离验收结束时项目库仍为空；用户随后已报告手动完成项目库建表。之后的业务测试仍只在新建的临时容器里运行。
+当前 324 项离线测试通过；真实验收共 95 组，包括 12 组执行器和 5 组终端聊天验证。只在新建临时容器测试，不操作项目数据库。已验证正式图执行、ASSISTANT 保存、两轮上下文、思考不入库、超时取消及迟到结果保护；不代表 HTTP 网页聊天可用。终端已接单进程生成限流，记忆写入、失败重试、启动/故障后自动核对仍待实现。项目库建表成功由用户之前报告。
 
 参考：[Alembic 迁移环境](https://alembic.sqlalchemy.org/en/latest/tutorial.html)、[自动生成与审阅限制](https://alembic.sqlalchemy.org/en/latest/autogenerate.html)。
 
@@ -490,12 +547,12 @@ uv run python -m unittest discover -s tests
 2. 在共享 registry 的当前会话短锁内开事务，按会话编号+用户锁定 chat_sessions 行。不存在和越权统一 SESSION_NOT_FOUND。
 3. 先按会话+client_message_key 查重：同键同正文返回现有 DuplicateMessageResponse，不新建记录、不调用准入检查、也不拥有原任务清理权；同键不同正文报 IDEMPOTENCY_CONFLICT。回执使用该 USER 当前 attempt_id/状态和真实关联回答编号，错误关联或未登记 RUNNING 不伪装正常。
 4. 新消息遇到占用报 SESSION_BUSY；数据库存在无本地登记的 RUNNING 则报 MESSAGE_SEND_UNAVAILABLE，等待后续恢复，不覆盖旧记录。
-5. 用后端 input_policy 组装输入并检查预算，再执行必填的 check_new_message 检查，然后生成 attempt_id、占用会话、保存一条 USER/RUNNING。预算检查使用下节的真实业务代码；check_new_message 留给尚未实现的按用户限流，测试仅注入替身，生产接口不能注入空检查。这些步骤不允许网络或模型调用。
+5. 用后端 input_policy 组装输入并检查预算，再执行必填的 check_new_message 检查，然后生成 attempt_id、占用会话、保存一条 USER/RUNNING。预算检查使用下节的真实业务代码；check_new_message 由终端注入按用户生成限流，未来生产接口也不能注入空检查。这些步骤不允许网络或模型调用。
 6. 首条 USER 且标题未手动修改时，用正文去首尾空白、换行替换为空格后的前 30 字符初始化标题；其他情况不覆盖标题。同一事务更新会话 updated_at 和 last_activity_at。提交成功后才交出 AcceptedMessage（会话/问题/执行编号，以及 prepared_input 输入快照），它是内部执行凭据，不新增 API 响应字段。
 
 ### 使用和退出：明确执行所有权
 
-with 的主体位于数据库事务和短锁之外，将来在这里执行并结算 Agent；当前只由测试模拟。不能把任务丢到后台后直接离开作用域，也不能在 async 事件循环中直接运行同步数据库/锁操作。真实异步取消、SSE 生命周期及执行器适配还没接入。
+with 的主体位于数据库事务和短锁之外，正式执行器在这里执行并结算 Agent。不能把任务丢到后台后直接离开作用域，也不能在 async 事件循环中直接运行同步数据库/锁操作。执行器和终端取消已接入，HTTP/SSE 生命周期仍待实现。
 
 正常离开或主体抛异常时，只处理本次拥有的 attempt_id：如果仍 RUNNING，保存 FAILED/GENERATION_INTERRUPTED；若已成功且回答存在，或已失败，则保留最终结果。确认提交后释放占用。重复回执退出不清理原任务；迟到的旧作用域不能释放新编号或改写新任务。
 
@@ -536,15 +593,181 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 计数采用 **UTF-8 字节数 + 消息/外层开销的保守估算**，不是字符数，也不是 DeepSeek tokenizer 的精确结果或计费数字。中文、英文和 emoji 占用不同。它可能比实际 token 数大，从而更早舍弃旧历史；不是对供应商最终编码的数学保证。
 
-本次未创建正式 Deep Agent，当前正式工具清单为空；框架预留不是已经测量过的默认工具开销。未来执行器必须使用同一个型号、输出上限和快照，把 `profile_memory` 接到只读用户记忆后端；传入实际工具定义、核对框架最终提示，并在每次真实模型调用前重新检查完整请求（含工具结果）。**不能仅凭本次通过预算检查，就宣称完整 Deep Agents 请求一定不超窗。** 不得把所有默认文件工具/子 Agent 直接暴露给用户，也不启用未经确认的自动历史摘要。
+本节输入组装完成时尚未创建正式 Deep Agent。2026-10-09 已补上下节的 Agent 工厂、只读记忆后端和最终请求预算保护；当前正式工具清单仍为空，未来启用工具时需要同步调整实际工具定义及预算计算。框架预留不是已经测量过的默认工具开销。**保守估算不等于供应商精确 tokenizer，也不能保证供应商最终编码永远不超窗。** 不向用户开放默认文件工具/子 Agent，不启用自动历史摘要。
 
-当前函数用于新消息，失败重试仍未实现；未来重试必须复用预算规则，但从原 USER 取问题并排除该问题自身，不能把重试伪装成一条新问题。本次也没有实现记忆写入工具、SSE、最终回复保存、执行期预算中间件或限流。
+当前函数用于新消息，失败重试仍未实现；未来重试必须复用预算规则，但从原 USER 取问题并排除该问题自身，不能把重试伪装成一条新问题。正式 Agent 与最终回复保存已在后续章节接上；终端已接单进程生成限流，记忆写入工具和 HTTP/SSE 仍未实现。
 
 ### 验证
 
 新增 19 项离线测试、8 组真实 MySQL 测试。验证 60 轮成功问答无固定轮数限制、相同时间戳跨批排序、逐整轮截取、当前问题原文只出现一次、失败问题排除、用户/会话隔离、记忆快照不被后续更新改变、超预算不落库且同 key 可再次提交、重复请求不重新预算及错误脱敏。
 
 全量 244 项离线测试、78 组隔离 MySQL 8.4.11 测试及迁移回退再升级通过。只使用一次性测试库，测试容器和数据已清理；没有调用真实模型、消耗 API 余额或修改项目数据库。
+
+## 创建正式聊天 Agent
+
+2026-10-09 完成创建模块及离线执行验证。本次新增文件按实际编写顺序：
+
+1. `app/agent/memory_backend.py`：先实现 `ProfileMemoryBackend`，继承 Deep Agents 的 `BackendProtocol`。把准备好的记忆文本作为只读虚拟 `/memories/profile.md` 提供给框架；没有实际磁盘文件、数据库连接或命令执行能力。其他文件路径拒绝读取，write/edit/delete/upload 全部拒绝；异步接口复用同样限制。每个实例只持有本次用户的不可变快照。
+2. `app/agent/budget_middleware.py`：再实现 `ChatMemoryBudgetMiddleware`，继承框架的 `MemoryMiddleware`。使用同名替换机制，让框架先加载快照、加入 system message，再检查最终请求。每次运行都重新从绑定快照加载，不接受调用参数夹带的 `memory_contents` 覆盖用户记忆。另用无操作的 `NoAutomaticSummary` 同名替换主 Agent 的自动摘要中间件，不调用额外摘要模型。
+3. `app/agent/factory.py`：最后用 `build_chat_agent(settings, prepared_input)` 组装前两项。校验配置型号与预算型号一致、容量未超已核对上限，然后创建 `ChatDeepSeek`，再调用真正的 `create_deep_agent`。不读取 `.env`，配置由后端调用方传入；不重复查询数据库、重新组装消息或创建新的用户问题。
+4. `tests/test_agent_memory_backend.py`、`tests/test_agent_budget_middleware.py`、`tests/test_chat_agent_factory.py`：分别验证只读后端、中间件、工厂及真实框架接线，共新增 23 项测试。
+
+### 正式工厂与旧探针的区别
+
+`check.py` 仍是单独运行并产生费用的无思考连通性探针，支持下文的可选 LangSmith 跟踪。正式工厂不使用探针的固定问题、128 token 输出上限或终端打印。2026-10-11 正式工厂启用 thinking、reasoning_effort=low；`prepared_input.policy.output_tokens`（默认 4096）由思考与最终正文共同使用。SDK 超时 60 秒、自动重试为 0；执行器另有默认 120 秒总超时。思考占满额度且最终 finish_reason=length 时记录失败，不把半截文字保存成成功答案。
+
+`build_chat_agent` 返回编译好的 LangGraph 图，不是回复。每次生成创建独立 Agent，不将带用户记忆的对象全局缓存。`checkpointer=None`、`store=None`，不持久化中途执行；长期记忆的权威来源仍是 MySQL，本次只消费输入组装阶段读取的快照。
+
+### 工具和容量保护
+
+当前是“只读已有记忆并回答”的阶段，没有记忆写入工具。框架的 memory 能力会读取后端并将记忆作为受限数据注入提示；不是仅由项目把 Profile 手工拼接到用户问题。[官方 Memory 说明](https://docs.langchain.com/oss/python/deepagents/memory)
+
+`tools=[]`、`subagents=[]` 本身不足以关闭所有框架默认工具。实际保护由中间件实施：交给模型前清空工具清单；模型意外返回工具调用时报安全错误；工具执行入口也统一拒绝，包括 `task` 委派。框架内部仍可能构建默认子 Agent/工具节点，但没有允许执行它们的路径。另用 `ModelCallLimitMiddleware(run_limit=1, exit_behavior="error")` 限制本次回答的模型调用次数；将来加入保存记忆工具时必须显式调整这些限制并补测试，不能直接挂工具就宣称可用。
+
+最终预算按实际 system message（含框架提示和记忆）、消息和空工具清单的序列化内容做 UTF-8 保守估算。框架内容已算入，不再重复扣初始的 framework_reserve；仍扣除输出、工具结果预留和安全余量。超限在调用模型前抛 `ContextTooLargeError`，不自动截断或摘要。生成已被接受之后遇到此错误，未来执行器应把它当作生成失败结算，不能伪装成从未接收过问题。未来启用工具时必须扩展为计入实际工具 schema 和执行结果。
+
+### 已验证和未完成
+
+267 项离线测试通过。新增测试验证：真实 `create_deep_agent` 编译成功；原生 MemoryMiddleware 读取快照；不同用户隔离；记忆正文只注入一次；超预算不调用模型/摘要；模型意外要求 task 时不执行；真实 DeepSeek 适配器接收正确配置（供应商调用已替换）；异步 astream 收到本地假模型的逐段文字。测试禁止网络连接并关闭 LangSmith 跟踪。
+
+上述工厂开发没有调用真实 DeepSeek，没有消耗 API 余额，没有改项目数据库。工厂创建期间关闭 LangSmith，但该上下文不会自动覆盖执行阶段。2026-10-11 的 `chat_execution` 已把工厂接到消息准入作用域，并用 `async_agent_tracing` 包住整个流消费；此入口处理执行、取消与最终保存，仍未接 HTTP/SSE。单独进入准入作用域却不执行，退出时仍会按原规则将未完成问题标为中断。
+
+## 正式聊天执行器：从问题到保存回答
+
+2026-10-11 完成这一块后端能力。入口为 `app/services/chat_execution.py` 的 `execute_chat_turn`。它是内部异步业务函数，不是命令行程序，也不是新增公开 API。调用方必须先认证，传入应用共享的 `GenerationRegistry`、Session factory、模型与 tracing 配置、输入预算、真实限流检查和异步事件消费者。终端入口已注入 `GenerationRateLimiter`；未来 HTTP 接口还需账号/IP 防护等措施，不能把测试替身挂成生产接口。
+
+### 编写顺序及文件作用
+
+1. 新增 `app/core/async_work.py`：用 `asyncio.to_thread` 执行短数据库操作；取消时通过 shield 等待在途操作结束，避免释放会话后线程还在提交。
+2. 修改 `app/agent/tracing.py`：补异步 tracing 上下文；上下文在事件循环设置，Client 收尾在线程完成。修改工厂开启正式聊天思考模式。
+3. 扩充 `app/schemas/stream.py`：定义进度与思考事件；新增 `app/agent/output.py`，分离供应商推理字段与最终回答，过滤非主模型消息、未知内容块及工具调用，并管理流关闭。
+4. 新增 `app/services/generation_result.py`：只负责短数据库事务，核对用户/会话/当前 attempt/RUNNING，保存 ASSISTANT 与 SUCCEEDED，或写安全 FAILED 摘要；最终状态不被覆盖。
+5. 新增 `app/services/chat_execution.py`：把已有准入、输入快照、工厂、流处理及结果保存串在一起。选择完整运行的协程 + `on_event` 回调，而非可能被调用者遗弃的裸异步生成器。
+6. 新增三份离线测试 `test_agent_output.py`、`test_generation_result.py`、`test_chat_execution.py`；扩充工厂和 tracing 测试；新增 `scripts/chat_execution_mysql_cases.py` 并接入现有隔离 MySQL 验收脚本。
+
+### 一次执行的顺序
+
+1. 在线程中进入已有 `accept_user_message`：验证归属、查重、检查预算/额度、准备历史和记忆快照、提交 USER/RUNNING。重复请求返回回执，不创建 Agent、不发送新流。
+2. 发 `message_start`、`agent_progress: context_ready`。此时数据库事务和短锁已经结束，不会一直持锁等待模型。
+3. 创建正式 Deep Agent，发 `agent_running`，开始 `agent.astream`。通过 `metadata["langgraph_node"]` 只接收主模型文字。模型可用 API 推理字段不是完整内部状态，不能把任意节点内容都展示给用户。
+4. 收到推理就发 `reasoning_delta`；收到正文就发 `message_delta`。首次收到对应片段时分别发 `thinking`、`answering` 进度。没有推理就不伪造思考文字；当前没有搜索/工具执行，也不会谎称搜索中。
+5. 等整个图正常退出，并验证 finish_reason=stop、正文非空。发 `saving`，在同一事务中保存完整 ASSISTANT 和 USER 的 SUCCEEDED。
+6. 关闭执行资源、核对数据库并释放仍属于本次 attempt 的会话占用，最后发 `message_done`。模型失败则保存 FAILED 并发 `message_error`。断线消费者抛错或调用方取消时，完成清理再传播异常，不继续向断开的客户端发事件。
+
+`on_event` 可以先让测试收集对象，未来也可以让 SSE 层序列化并发送到浏览器。当前只产生结构化事件，不等于已经创建 HTTP 流。
+
+### 思考文字放在哪里
+
+思考文字与工作进度都只用于本次事件流，不写进 `messages.content`，不进入下轮上下文，刷新后不恢复；数据库不增加列或迁移。正式回答仍持久化。启用 LangSmith 时，模型提示、记忆、推理和回答可能另外上传到 tracing 服务，不应把“不入聊天表”误解为“绝对不在任何地方留存”。
+
+当前无工具请求不回传旧推理；将来添加记忆写入工具时，必须按供应商规则补推理回传与预算，不能仅解除工具拦截。[DeepSeek 官方说明](https://api-docs.deepseek.com/guides/thinking_mode/)
+
+### 安全边界与验证
+
+- 只有当前占用与数据库 attempt 都匹配、且状态为 RUNNING，才能首次保存结果；FAILED 的迟到回答拒绝，已成功提交不再重复插入。
+- 保存事务返回异常时，用新事务锁定父会话核对：已成功则返回成功；未提交则记录失败；数据库无法核对则保留占用并报安全业务异常，不谎称空闲。启动/长期故障后的自动修复仍未实现。
+- 默认 120 秒从准入成功后开始，包含模型、事件消费及结果保存；同步事务取消不等于线程停止，因此必须等待实际事务与清理结束，总耗时可能超过 120 秒。
+- 事件消费者应快速接收并遵守背压，不能无限缓存；未来 HTTP 层需在断线时取消执行协程。最终事件发送失败不回滚已保存回答，重连后查历史确认。
+- 303 项离线测试通过；90 组真实 MySQL 8.4.11 验收通过，新增 12 组涵盖两轮上下文、思考不入库、重复/并发/隔离、超时取消、提交前后故障、取消发生在 USER/ASSISTANT 提交期间及迟到结果拒绝。MySQL 测试使用真实 Deep Agents 图，供应商网络部分由假流替换。
+- 没有调用真实 DeepSeek 或 LangSmith，没有消耗真实 API 余额，没有触碰项目数据库。只创建并清理了一次性测试容器。未提交或推送 Git。
+
+可复查测试（在 backend 目录）：
+
+```bash
+uv run python -m unittest discover -s tests -q
+# 下面会创建并清理专用临时 MySQL 容器，要求 Docker 已启动和已有 mysql:8.4 镜像。
+uv run python scripts/check_migration_mysql.py
+```
+
+这一步结束后，仍需补失败重试、记忆写入/查询业务、HTTP 账号/IP 限流、启动清理，以及 HTTP/SSE 和聊天网页。终端已接单进程生成限流。实际供应商的正式思考流与 LangSmith 上传尚需另外联调，不能把本地假流测试当成已验证真实云端效果。
+
+## 个人记忆保存与查询业务
+
+本次只完成记忆存取服务，没有启用 Agent 自动提取或记忆工具，没有新增 HTTP 路由、CLI 命令、表或迁移。终端里说“记住我喜欢中文”目前仍不会自动写入记忆；下一步才接模型工具。
+
+### 按编写顺序学习
+
+1. `app/services/profile_memory.py` 的 `ProfileFact`：定义后端内部的存储参数，每条包含 `memory_key`（主题）和 `summary`（完整摘要）。复用表模型的 25 个主题，摘要去掉首尾空白后必须为 1～500 字符。拒绝额外传入 user_id、memory_type、attempt_id；类型由主题推导，用户和生成编号从后端准入结果获得。这不是新增公开 API Schema。
+2. 同文件的 `list_profile_memory`：接收已通过认证的 `current_user`，只查询该用户的 `agent_memory`，按 updated_at、memory_id 倒序排列，再用已有 `MemoryListResponse` 返回公开字段。没有记忆返回 `items=[]`；数据库失败不能假装空列表。以后 `GET /api/v1/me/memory` 调用它，但目前还没有该路由。
+3. 同文件的 `save_profile_facts`：接收后端的 `AcceptedMessage` 和已审核摘要，检查本地运行登记、会话归属、原问题及数据库 attempt/status；只有当前 RUNNING 尝试且尚无最终回答才能写。使用 MySQL 的 `INSERT ... ON DUPLICATE KEY UPDATE`：同用户同主题已有记录就更新，没有就插入。只更新本次涉及的主题，不拿一整份旧 Profile 覆盖所有内容。
+4. `services/errors.py` 增加 `MemoryUnavailableError`：查询或保存不能确认时返回安全错误，不暴露原始 SQL、记忆或凭据。增加离线测试和 `scripts/profile_memory_mysql_cases.py`，后者加入现有隔离 MySQL 验收。
+
+例如，调用方已经按规则整理出一条记忆时，内部参数长这样：
+
+```python
+ProfileFact(memory_key="preference.language", summary="喜欢用中文解释")
+```
+
+保存函数从可信执行上下文取得 user_id，自己推导 memory_type 为 LEARNING_PREFERENCE。如果这个用户已经有该主题，就更新同一条记录，保留 memory_id 和 created_at；不会因重复调用多出一条，不会改用户昵称或聊天消息。一次批次 1～25 条且不能重复主题，全批次在同一个短事务中提交，得到提交确认后才返回本次涉及的记忆。
+
+### 存储完成不等于自动记忆完成
+
+这里的摘要必须是调用方已经审核、合并后的完整主题值。例如原来是“使用 Git”，用户补充 Docker 时，调用方应该提交“使用 Git 和 Docker”，不能只提交“使用 Docker”导致旧事实丢失。存储层不调用 LLM，无法自行判断自然语言是补充、纠正、临时要求还是敏感信息，也不声称实现了语义过滤。
+
+下一步接工具时，必须落实明确陈述、敏感信息排除、原摘要合并及模型工具参数限制；只开放受控的记忆写入工具，不能直接把此服务当作可任意写入的公开接口。现有 Agent 工厂仍禁止工具调用，调用次数/工具预算与供应商推理回传也需要届时一起调整。
+
+### 事务、并发和失效保护
+
+- 同用户不同会话写不同主题互不覆盖；同主题并发按数据库提交顺序后写生效，不做版本合并或证据累计。主题按固定顺序写入，减少多主题并发死锁风险；数据库错误不自动重试。
+- 本地会话锁、父会话行锁和问题行锁一直覆盖到短事务结束，不在锁内等待模型。服务不释放生成占用，也不改变问题状态；释放和结算仍由执行器负责。
+- 已失败、已完成、被新 attempt 替代或不再占用会话的旧调用不能写入。未来异步工具必须通过现有线程适配等待在途数据库操作收尾，取消后不能再启动新写入；本次不声称已完成工具取消集成。
+- 提交前失败则整批回滚；提交确认丢失则可能已经落库，函数报“无法确认”，不谎报成功或保证原值未变。已提交记忆不会因之后的回答失败而回滚。
+- 新会话继续使用现有输入组装逻辑读取同一份 MySQL 记忆；不新建磁盘 Profile 文件，也不把其他会话的全部聊天记录当长期记忆。
+
+只运行新增离线测试：
+
+```bash
+cd /Users/roey/projects/AI-teaching-agent/backend
+uv run python -m unittest discover -s tests -p 'test_profile_memory.py' -v
+```
+
+真实数据库验收仍用 `uv run python scripts/check_migration_mysql.py`，只操作脚本创建的临时容器。覆盖新增/更新/不重复、用户隔离、稳定排序、不同主题和同主题并发、跨会话读取、整批回滚、提交确认丢失、失效尝试拒绝。本次新增 14 项离线测试、9 项 MySQL 测试；全套共 338 项离线测试和 104 项 MySQL 测试通过，临时容器及其测试数据已清理。测试不调用模型、不修改项目库。
+
+## LangSmith 执行跟踪（可选）
+
+LangSmith 之前已作为间接依赖安装，代码也曾导入 `tracing_context`，但当时明确关闭上传。现在把它列为直接依赖，并加入配置开关；默认仍关闭，填写配置后才启用。不需要给每个函数加装饰器，LangGraph 和 LangChain 自带的回调可以记录执行过程。[官方说明](https://docs.langchain.com/langsmith/trace-with-langgraph)
+
+### 添加和修改的位置
+
+| 文件 | 作用 |
+|---|---|
+| `app/core/config.py` 的 `TracingSettings` | 从后端 `.env` 读取开关、LangSmith 密钥、项目名和服务地址；不上传 |
+| `app/agent/tracing.py` 的 `agent_tracing` | 导入 `Client`、`tracing_context`；明确把配置交给 SDK，并在执行期间开启跟踪，结束后给上传队列收尾 |
+| `app/agent/check.py` 的 `main` | 将终端探针的整个异步回答过程放进跟踪范围 |
+| `langsmith.env.example` | 无密钥的配置模板，供追加到已有 `.env` |
+| `tests/test_agent_tracing.py` | 假 Client 离线测试，不上传真实 trace |
+
+Pydantic 读取 `.env` 不等于把配置写进全局环境变量，所以这里显式创建 `Client` 并传入配置，而不是仅添加一行 import。不要给带密钥的 settings 对象加 `@traceable`。
+
+### 如何启用并查看
+
+1. 在自己的 LangSmith 账号中创建 API Key。它不是 DeepSeek API Key，不要发到聊天中。
+2. 参考 `backend/langsmith.env.example`，把下列配置追加到 `backend/.env`，保留原有 `DB_*`、`MODEL_*`；已有同名配置时修改原行，不重复追加：
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=填写自己的LangSmith密钥
+LANGSMITH_PROJECT=ai-teaching-agent-dev
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_WORKSPACE_ID=
+```
+
+地址必须匹配账号区域。本项目当前配置校验支持 US 默认地址及 EU 地址 `https://eu.api.smith.langchain.com`；其他区域需先扩展校验，不能直接填 US 地址替代。仅当 Key 需要指定工作区时填写 `LANGSMITH_WORKSPACE_ID`。
+
+3. 在 `backend` 目录执行：
+
+```bash
+uv sync --locked
+uv run python -m app.agent.check
+```
+
+这会调用一次真实模型并可能产生费用。进入 LangSmith 对应工作区的 `ai-teaching-agent-dev` 项目查看新 trace，可检查图节点、模型输入输出、耗时及错误；实际显示内容取决于执行步骤和供应商返回的数据。终端显示 tracing 开启只代表代码已启用，不证明上传成功；没有记录时检查 Key、项目、工作区、区域和网络。
+
+**隐私提醒：开启后，对话、系统提示及提示中的个人记忆可能上传到 LangSmith。** 当前探针只发送固定问题，不读取数据库记忆；正式聊天未来接入时也需要考虑这点。要关闭，设置 `LANGSMITH_TRACING=false`。
+
+终端探针使用 `agent_tracing`；新消息执行器使用 `async_agent_tracing`，后者把 Client 收尾放到线程，避免阻塞事件循环。正式工厂的创建不等于执行，跟踪范围覆盖整个流消费。按次管理 Client、收尾最多等待 5 秒；未来大并发可另行采用应用生命周期 Client。HTTP 网页尚未接入，不能因此认为网页聊天已有 trace。
+
+本次 276 项离线测试通过，包括新增 9 项 tracing 测试；没有使用真实 LangSmith Key，没有调用真实模型或确认云端上传。
 
 ## Deep Agents 最小真实调用（阶段 0）
 
@@ -568,7 +791,7 @@ uv run python -m app.agent.check
 
 探针限制为一次模型调用、最多 128 个输出 token、单次网络超时 30 秒、整体等待 60 秒，不自动重试。模型输出被截断、为空或未正常结束都不算成功。只打印安全错误提示，不打印原始异常或密钥；遇到错误可提供安全提示排查，不要发送 .env 内容。
 
-这次只验证回答，所以在发给模型前隐藏所有工具（仅设置 tools=[] 不会移除框架内置工具）。没有挂载宿主机文件、连接数据库或设置持久化 checkpoint，也关闭了本次 LangSmith tracing。只发送固定测试问题和 Agent 提示，不发送项目文件或数据库内容。工具调用和长期记忆需要后续另外验证。
+这次只验证回答，所以在发给模型前隐藏所有工具（仅设置 tools=[] 不会移除框架内置工具）。没有挂载宿主机文件、连接数据库或设置持久化 checkpoint；LangSmith tracing 由上文配置控制，默认关闭。只发送固定测试问题和 Agent 提示，不发送项目文件或数据库内容。工具调用和长期记忆需要后续另外验证。
 
 **终端逐段打印不等于网页 SSE 已完成。** 后面还要让 FastAPI 把这些文字转成 SSE，再让 React 接收并显示。当前网页仍是 /health 检查页面。
 

@@ -1,6 +1,6 @@
 """只定义 SSE 的 data 数据；不启动流、不调用 Agent，也不负责发送事件。"""
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,6 +35,22 @@ class MessageDoneData(_EventData):
     attempt_id: UUIDString
     assistant_message: AssistantMessageResponse
     # “回答已保存”必须由业务代码保证：事务成功提交后才能发送 done。
+
+
+class ReasoningDeltaData(_EventData):
+    """模型 API 明确返回的推理文字；仅当次展示，不保存为聊天正文。"""
+
+    event_name: ClassVar[str] = "reasoning_delta"
+    attempt_id: UUIDString
+    text: str = Field(min_length=1)
+
+
+class AgentProgressData(_EventData):
+    """实际到达的执行阶段；不是模型编造的步骤，也不输出内部状态/个人记忆。"""
+
+    event_name: ClassVar[str] = "agent_progress"
+    attempt_id: UUIDString
+    stage: Literal["context_ready", "agent_running", "thinking", "answering", "saving"]
 
 
 class StreamError(GenerationError):

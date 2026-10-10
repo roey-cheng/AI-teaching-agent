@@ -2,9 +2,9 @@
 
 **创建日期：** 2026-09-20
 
-**更新日期：** 2026-09-26
+**更新日期：** 2026-10-11
 
-**状态：** 当前实现依据；已有 Schema、账号、会话、历史和消息准入/USER 保存业务的离线及隔离 MySQL 验证。真实输入预算/限流、生成执行、重试、启动/故障恢复、HTTP/SSE 和网页验收尚未完成。
+**状态：** 当前实现依据；已有 Schema、账号、会话、历史、消息准入/USER 保存、输入组装、正式 Agent 和只读记忆。2026-10-11 增加新消息异步执行器、思考/进度事件、完整回复保存、超时取消、终端入口和单进程生成限流；随后补充记忆保存/查询服务，验证详情见后端 README。Agent 记忆提取/写入工具、重试、启动/故障恢复、HTTP/SSE 和网页验收尚未完成。
 
 **API 前缀：** /api/v1
 
@@ -299,7 +299,7 @@ GET /api/v1/chat/sessions/{session_id}/messages，无分页参数，要求登录
 
 全部消息按 created_at ASC, message_id ASC 返回，即从旧到新。同一时间用 ID 保证稳定顺序。ASSISTANT 不包含 generation，使用 in_reply_to_message_id 指向问题。
 
-这里的“全部历史”仅指路径中这个会话的全部消息，供页面展示，不包含其他会话的消息。发送或重试时，后端另外组装模型上下文：先为系统提示、当前问题、本人 Profile Memory、工具及输出等预留 token 预算，再从最近一轮完整成功问答向前选取，下一轮放不下就停止，最终按从旧到新顺序交给模型。不设固定轮数上限，当前问题只完整加入一次。模型窗口、可配置应用 token 预算和实际输入/输出限制共同约束加载量，计数适配规则见内部设计第 3.1 节。未选入的历史仍保留在数据库和页面；当前问题移除历史后仍放不下时，接受前返回 422 CONTEXT_TOO_LARGE，不保存新问题或截断正文。这是已确认设计，预算实现仍待接入。
+这里的“全部历史”仅指路径中这个会话的全部消息，供页面展示，不包含其他会话的消息。发送或重试时，后端另外组装模型上下文：先为系统提示、当前问题、本人 Profile Memory、工具及输出等预留 token 预算，再从最近一轮完整成功问答向前选取，下一轮放不下就停止，最终按从旧到新顺序交给模型。不设固定轮数上限，当前问题只完整加入一次。模型窗口、可配置应用 token 预算和实际输入/输出限制共同约束加载量，计数适配规则见内部设计第 3.1 节。未选入的历史仍保留在数据库和页面；当前问题移除历史后仍放不下时，接受前返回 422 CONTEXT_TOO_LARGE，不保存新问题或截断正文。新消息输入组装与预算估算已有实现；HTTP 映射及失败重试业务尚未接入。
 
 is_generating 表示本会话是否仍有实际运行。generation 取 USER 自身的最新状态，成功时返回关联的 assistant_message_id；失败时返回简短错误。can_retry 只有在“会话无运行、该问题为整个会话最后一条 USER、最近生成已确认失败”时为 true。查询时保证同一响应的状态一致；写接口仍重新验证。
 
@@ -331,7 +331,7 @@ client_message_key 是前端生成的 UUID，同一次发送网络重发复用�
 
 被拒绝的新请求不留下 USER 或占用新消息键。模型生成期间不持有数据库事务。保存时仍核对 attempt_id 与 RUNNING 状态，旧执行不能覆盖新一次重试。
 
-第一步内部业务已实现于 `backend/app/services/message_submission.py` 的 `accept_user_message`：以 with 管理新执行的所有权，先检查归属和重复键，再检查忙碌、调用必填的新消息准入检查、保存 USER/RUNNING 并更新标题/活动时间。新接受返回内部 AcceptedMessage，重复返回已有 DuplicateMessageResponse；不是新增公开响应格式。作用域退出时把本次仍未完成的记录结算为 GENERATION_INTERRUPTED，已确认最终状态不覆盖，重复回执不清理原任务。数据库失败预留 503 MESSAGE_SEND_UNAVAILABLE；提交结果不明时独立核对，不自动再次 INSERT 或调用模型，核对失败保留占用。真实预算/限流只留检查入口（测试使用替身），执行器、异步取消、SSE、故障后自动核对和启动清理尚未接入，不能把此阶段当作可用的聊天接口。
+消息准入已实现于 `backend/app/services/message_submission.py` 的 `accept_user_message`：以 with 管理执行所有权，检查归属、重复键、忙碌、输入预算及必填限流检查，保存 USER/RUNNING 并更新标题/活动时间。新接受返回 AcceptedMessage（含输入快照），重复返回 DuplicateMessageResponse，不新增公开响应格式。2026-10-11 的 `chat_execution.execute_chat_turn` 已在该作用域内串起正式 Agent、异步流、思考/进度事件、超时取消与最终保存。退出时核对状态并匹配释放占用，不覆盖最终状态，不盲目重发 INSERT 或调用模型；核对失败保留占用。真实限流、HTTP/SSE、故障后自动核对和启动清理仍待实现，不能把内部业务可运行当作已有公开聊天接口。
 
 ### 6.4 重试最后一个失败问题
 
@@ -381,9 +381,17 @@ failed_attempt_id 必填 UUID，取自历史接口中该问题的 generation.att
 | 事件 | 含义 | 数据 |
 |---|---|---|
 | message_start | 问题已登记，本次生成开始 | session_id、user_message_id、attempt_id |
+| agent_progress | 实际执行阶段，不是模型编造的步骤 | attempt_id、stage |
+| reasoning_delta | 模型 API 提供的新增推理文字，与回答分开 | attempt_id、text |
 | message_delta | 新增可见回答片段 | attempt_id、text |
 | message_done | 完整回复已保存 | attempt_id、assistant_message |
 | message_error | 本次生成已确认失败 | attempt_id、error |
+
+2026-10-11：后端执行器已产生上述结构化事件，但尚未通过 HTTP 发送 SSE。`on_event` 由未来接口层实现；重复请求直接返回 JSON 回执，不产生新的事件流。思考与进度不增加公开接口数量，仍是 11 个业务接口。
+
+`stage` 仅允许：`context_ready`（本会话历史与本用户记忆快照准备完毕）、`agent_running`（即将消费 Agent 流）、`thinking`（开始收到 API 推理文字）、`answering`（开始收到回答正文）、`saving`（完整生成结束，开始保存）。`thinking`、`answering` 各在首个对应片段时发送一次；没有推理片段就不虚构思考内容。完成/失败由终止事件表示，不提前发送“已保存”。
+
+思考文字仅当次展示，不进入 `messages.content`、不进入下轮历史，也不新增数据库列；刷新后不恢复。未来前端用单独的可折叠区域展示，按 `attempt_id` 隔离。所有这些文字都按不可信文本处理，不能直接注入 HTML。当前只允许主模型白名单文字字段，工具参数、通用图状态及记忆快照不直接转发。模型生成的推理可能复述输入中的个人信息，因此不是额外的隐私隔离机制；只应交给通过认证的会话所有者。
 
 ~~~text
 event: message_start
@@ -429,6 +437,8 @@ data: {"attempt_id":"30dfe922-1183-4dfb-9ce7-ea940d619195","error":{"code":"MODE
 网络自动重发不等于用户点击失败重试。失败后点击重试走接口 10，不换 client_message_key 重新提交一条相同问题。用户主动再次发送同样文字则是新消息，使用新消息键。
 
 ## 9. Profile Memory
+
+实现进度：查询 Schema 与内部查询/保存业务已完成，HTTP 路由、Agent 记忆提取和写入工具尚未接入。本节仍描述完整目标，不表示聊天已经能自动形成新记忆。
 
 GET /api/v1/me/memory，要求登录，返回本人实际保存的摘要：
 
