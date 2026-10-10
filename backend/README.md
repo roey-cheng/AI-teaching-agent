@@ -2,7 +2,7 @@
 
 语言约定：程序自身的运行提示和校验报错使用英文；代码注释与教学说明保留中文。用户消息、昵称、记忆及模型回答不在此规则下强制翻译。
 
-使用 Python + FastAPI，在 `app/` 中逐步实现账号、聊天和 Deep Agents 等功能。目前已准备独立 Python 环境和基础依赖，并创建应用入口 `app/main.py` 及 `GET /health` 接口；账号和聊天等业务接口尚未实现。
+使用 Python + FastAPI，在 `app/` 中逐步实现账号、聊天和 Deep Agents 等功能。应用入口为 `app/main.py`；现已接通 `GET /health` 和全部 11 个业务 HTTP 接口，包含发送消息、失败重试的 SSE。React 业务页面、浏览器端到端及真实供应商 HTTP 联调仍待完成。
 
 ## Python 环境
 
@@ -31,7 +31,176 @@
 
 以上库还会自动安装它们所需的其他依赖，包括 LangGraph。安装了模型相关库不代表已经选定模型提供方，也不会自动调用模型。
 
-MySQL 驱动、SQLAlchemy 和 Alembic 已安装，五张表模型、迁移、API Schema、账号/会话/历史业务已有测试，用户已报告项目库建表成功。已有正式 Deep Agents、聊天执行器、终端入口、思考/进度事件、结果保存和单进程生成控制。已接记忆存取服务、独立记忆 Agent 与 `/memory`，详见“Agent 自动记忆：两阶段执行”。失败重试业务及共享执行器已实现；终端和 FastAPI 已接启动残留清理及同项目进程锁。终端 `/retry`、业务 HTTP/SSE、Cookie 和聊天网页尚未接入。本次自动测试未调用真实模型或 LangSmith，也未连接或修改项目数据库。
+MySQL 驱动、SQLAlchemy 和 Alembic 已安装，五张表模型、迁移、API Schema、账号/会话/历史业务已有测试，用户已报告项目库建表成功。已有正式 Deep Agents、聊天执行器、终端入口、思考/进度事件、结果保存和单进程生成控制。已接记忆存取服务、独立记忆 Agent 与 `/memory`，详见“Agent 自动记忆：两阶段执行”。失败重试业务及共享执行器已实现；终端和 FastAPI 已接启动残留清理及同项目进程锁。全部 11 个业务 HTTP 接口已接通，含 Cookie、来源检查、账号/生成限流和 SSE；终端 `/retry` 命令及网页尚未接入。本次自动测试未调用真实模型或 LangSmith，也未连接或修改项目数据库。下文早期阶段记录中的“未来接口”属于当时进度，以本节及下方 HTTP/SSE 小节最新状态为准。
+
+## 账号 HTTP 接口
+
+2026-10-11：把已有的账号 Schema 和业务服务接到 FastAPI，没有增加数据库表、迁移或依赖。四个接口是真实业务，不是假用户响应；网页注册/登录表单尚未编写。
+
+| 方法和路径 | 调用的业务函数 | 成功结果 |
+|---|---|---|
+| `POST /api/v1/auth/register` | `register_user` | 201，公开用户信息；不自动登录 |
+| `POST /api/v1/auth/login` | `login_user` | 200，用户信息 + 登录 Cookie |
+| `POST /api/v1/auth/logout` | `logout_user` | 204，无正文，撤销当前凭据并清除 Cookie |
+| `GET /api/v1/users/me` | `get_current_user` | 200，Cookie 对应的当前用户 |
+
+### 文件职责与阅读顺序
+
+1. `app/core/http_config.py`：读取 `HTTP_*`，定义可信页面来源和 Cookie 是否只通过 HTTPS 发送。启动时才读取；不改变已有数据库/模型配置。
+2. `app/api/errors.py`：把业务错误转换成 HTTP 状态和 `error.code/message/request_id`；校验失败不回显输入。未知错误只返回安全英文提示，日志仅记录请求编号，不记录异常、SQL、密码或请求体。
+3. `app/api/security.py`：先检查 POST 的 Origin，再检查查询参数、限流、JSON 类型和 16 KiB 正文上限。登录 IP/规范化邮箱分别 10 次/分钟，注册 IP 10 次/小时；进程内保存，重启重置。IP 额度计入已通过来源/查询检查的请求（包括后续格式错误）；邮箱额度在 Schema 通过后计入。已满的计数表拒绝新身份，不淘汰有效计数；到期条目清理。
+4. `app/api/accounts.py`：四个路由。接收 Schema/读取 Cookie，把完整同步业务放在线程中执行，再返回公开响应。登录业务提交成功后才设置 Cookie，退出成功后才清除 Cookie。
+5. `app/main.py`：挂载路由、错误处理和请求编号中间件；让接口复用启动时创建的数据库 Session factory，不另建数据库连接配置。
+6. `tests/test_account_http.py`：离线测试 HTTP 输入输出、Cookie、错误脱敏、来源检查和限流。`scripts/account_http_mysql_cases.py`：真实 HTTP→业务→临时 MySQL 的注册/登录/退出、隔离、轮换、过期和重启测试；已加入原验收脚本。
+
+Cookie 名为 `chat_session`，HttpOnly、SameSite=Lax、Path=/、无 Domain（仅当前主机），固定 7 天、不滑动续期。注册不创建 Cookie；登录 JSON 不返回凭据；退出不撤销其他设备，也不删除聊天数据。所有 HTTP 响应带 `X-Request-ID` 和 `Cache-Control: no-store`。
+
+POST 必须带允许的 `Origin`，缺少、`null`、重复或不匹配返回 403。注册/登录要求 `Content-Type: application/json`，可带 charset；其他类型返回 415。账号请求正文超过 16 KiB 返回 413。退出与当前用户不接受正文；四个接口都不接受查询参数，违反时返回 422。未知字段仍由既有 Schema 拒绝。频率超限返回 429 和 `Retry-After` 秒数。
+
+### 本地测试入口
+
+准备好 MySQL/迁移/`DB_*`，停止终端聊天，然后运行：
+
+```bash
+cd /Users/roey/projects/AI-teaching-agent/backend
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+打开 <http://127.0.0.1:8000/docs>，展开 Accounts 中的接口，用 Try it out 按“注册→登录→当前用户→退出→当前用户”测试。登录后的 Cookie 由同一浏览器保存并携带，退出后的当前用户应返回 401。注册、登录会实际写入项目数据库，但不会调用大模型。终端 curl 等非浏览器客户端也必须显式提供可信 Origin；Origin 是浏览器跨站防护，不是账号认证的替代品。
+
+默认允许本机 `localhost` / `127.0.0.1` 的 5173（Vite）与 8000（后端文档页）来源，不需要修改现有 `.env`。可选模板见 `http.env.example`，只合并需要的配置，不要覆盖已有密钥。部署时必须改成真实 HTTPS 来源、`HTTP_COOKIE_SECURE=true`，配置同站点反向代理，不启用宽泛 CORS。来源列表精确匹配，不带末尾 `/`。
+
+限流使用 ASGI 提供的客户端地址，不自行相信 `X-Forwarded-For`。部署代理时必须限制 Uvicorn 的受信代理地址（`--forwarded-allow-ips`），不直接信任公网客户端任意转发头。当前仅支持一个后端进程；生产还需网关层请求体积/连接超时和资源保护。
+
+自动测试不使用项目数据库：
+
+```bash
+uv run python -m unittest discover -s tests -q
+uv run python scripts/check_migration_mysql.py
+```
+
+本次新增 18 项离线测试、4 项真实 HTTP/MySQL 测试；完整 403 项离线、142 项隔离 MySQL 测试及迁移往返验证通过。临时容器与一次性测试数据已清理，没有修改项目数据库、调用真实模型或发送 LangSmith trace。
+
+## 会话、历史与 Profile Memory HTTP 接口
+
+2026-10-11：复用既有 Schema 和业务函数，新增五个接口，不增加表、迁移、依赖或模型调用。此阶段先将接口接到 9 个；随后完成剩余两个 SSE 接口，见下一节。
+
+| 方法与路径 | 用途 | 请求/响应 |
+|---|---|---|
+| `POST /api/v1/chat/sessions` | 新建自己的空会话 | 必须提交 `{}`，返回 201 会话对象 |
+| `GET /api/v1/chat/sessions` | 左侧栏会话列表 | 返回 200 `items`，最近活跃优先 |
+| `PATCH /api/v1/chat/sessions/{session_id}` | 只修改标题 | `{"title":"新标题"}`，返回 200 会话对象 |
+| `GET /api/v1/chat/sessions/{session_id}/messages` | 当前会话全部历史 | 返回 `session_id`、`is_generating`、`items` |
+| `GET /api/v1/me/memory` | 查看本人已保存的记忆 | 返回 200 `items`，未保存记忆时为空列表 |
+
+### 文件及执行流程
+
+1. `app/api/dependencies.py`：共享登录检查。读取 Cookie→调用 `get_current_user`→把可信当前用户交给路由。`CurrentUser` 是 FastAPI 的依赖注入声明，不是前端请求字段；OpenAPI 会标出 Cookie 认证。
+2. `app/api/chat_sessions.py`：新建、列表、重命名、历史四个路由。前面三个复用 `services/chat_sessions.py`，历史复用 `services/message_history.py`。
+3. `app/api/memory.py`：只调用 `list_profile_memory` 读取 MySQL，不运行 Agent、不更新记忆，也不提供记忆修改接口。
+4. `app/api/security.py`：提取通用来源/查询参数/JSON/正文边界检查供账号和资源接口复用。新建和 PATCH 要求可信 Origin、application/json；三个 GET 不接受正文；这五个接口不接受任何查询参数，包括前端指定 user_id 或分页参数。正文上限 16 KiB，超限 413；未来聊天正文不能直接沿用此上限。
+5. `app/api/errors.py`：补充 404 SESSION_NOT_FOUND 以及 503 SESSION_UNAVAILABLE、MESSAGE_HISTORY_UNAVAILABLE、MEMORY_UNAVAILABLE 映射。数据库错误不冒充空列表；异常细节不输出。
+6. `app/main.py`：挂载两组新路由；复用应用启动时建立的数据库工厂与运行登记。
+
+所有资源接口都要求登录，身份来自 Cookie，不接受前端指定主人。路径会话 ID 使用既有正整数/BIGINT UNSIGNED 规则，不合法返回 422；ID 在 API 中保持字符串。修改或读取别人会话与读取不存在会话统一返回 404。
+
+历史查询读取应用**同一份** GenerationRegistry；数据库与短锁操作完整放到线程中，不能在异步事件循环直接等待锁。保留原服务的问答顺序、每条问题的生成状态、简短错误和 can_retry。生成结束但收尾尚未完成仍显示忙碌；未登记的 RUNNING 返回 503，不在 GET 中偷偷修复数据。
+
+记忆属于用户，不属于会话：按 updated_at DESC、memory_id DESC 返回本人摘要，只公开 memory_id、memory_type、summary、updated_at，不公开内部 memory_key 或 user_id。查看不会重新提取记忆。新建会话、列表、重命名也都不调用模型。
+
+### 手动验证顺序
+
+沿用上面的后端启动命令，在 `/docs` 中先登录，保持同一主机地址（不要在 localhost 与 127.0.0.1 之间切换 Cookie）：
+
+1. 在 Chat sessions 下 POST `{}`，记下返回的 session_id。
+2. GET 列表，应看到新会话；PATCH 标题，再 GET 确认。
+3. GET 该会话 messages，新会话是空列表；已有终端聊天会话会返回实际保存的问答。
+4. 在 Profile memory 下 GET，本账号有已保存记忆则返回摘要，没有则 `items: []`。
+5. 退出后再查询应为 401；另一个账号尝试读取/改名原账号会话应为 404。
+
+这些操作会实际创建/修改项目会话，但不调用模型。前端页面仍未实现；`can_retry` 返回 true 只代表业务上允许，HTTP 重试路由本轮尚未接入。
+
+自动测试新增 `tests/test_resource_http.py` 和 `scripts/resource_http_mysql_cases.py`，后者已加入原临时 MySQL 验收器；测试覆盖两用户隔离、历史完整问答、旧失败不允许重试、错误摘要过滤、共享忙碌状态、记忆排序和只读性。仅向隔离测试库写入样例，结束清理自己的记录与临时容器，不访问项目库或模型。
+
+本轮新增 17 项离线与 6 项隔离 MySQL 测试。完整 420 项离线、148 项隔离 MySQL 测试通过，迁移重复升级和回退再升级也通过；临时容器已清理。
+
+## 发送消息与失败重试 SSE 接口
+
+2026-10-11：最后两个 POST 已接通，11 个业务接口全部具备后端入口；不增加订阅接口、数据库表或依赖。
+
+| 方法与路径 | 请求体 | 行为 |
+|---|---|---|
+| `POST /api/v1/chat/sessions/{session_id}/messages` | `client_message_key` UUID、`content` | 接受新问题后流式回答；同键同正文重发返回 JSON 回执 |
+| `POST /api/v1/chat/sessions/{session_id}/messages/{message_id}/retry` | `failed_attempt_id` UUID | 只重试最后一个失败问题，复用原 USER；重复重试返回 JSON 回执 |
+
+### SSE 用人话说
+
+SSE = Server-Sent Events，服务器发送事件。仍然是 HTTP 请求，只是响应不必一次全部返回：保持连接，把新内容按事件连续发给浏览器。不是每个字重新发一次请求，也不等于 WebSocket。
+
+本项目的分工是：Deep Agents 组织模型与工具执行；执行器产生“正在检查记忆”“新增回答文字”“已保存”等事件；SSE 将这些事件送到浏览器；未来 React 根据事件更新页面。SSE 自己不思考、不生成文字。
+
+例如一次请求会依次收到（示意，不代表固定措辞）：
+
+```text
+message_start   已接收问题
+agent_progress  正在检查记忆
+reasoning_delta 模型 API 返回的一段推理文字（不保证每次有）
+message_delta   Python 的列表
+message_delta   可以保存多个元素。
+message_done    完整回答已保存
+```
+
+### 新文件和执行顺序
+
+1. `app/api/chat_messages.py`：验证 Cookie/Schema 后准备发送或重试，按需加载后端模型、tracing 和输入预算，复用 `execute_chat_turn` / `execute_chat_retry`。账号与只读查询不要求模型配置；配置不合法时在保存问题前返回安全的 503。新发送/重试共用应用的用户生成限流器与 GenerationRegistry。
+2. `app/api/sse.py`：把六种公开事件编码成 `event: 名称` 与 `data: JSON`，以空行分隔。JSON 转义正文换行，不能借正文伪造事件。不转发工具参数、完整 Agent state 或记忆快照。
+3. `api/security.py`：复用来源、JSON 和查询参数检查，聊天两个 POST 的原始请求体上限为 256 KiB（允许 20,000 字符的 Unicode/JSON 转义）；Schema 仍限制正文 20,000 字符、拒绝空白或额外模型/用户字段。不是扩大模型 token 预算。
+4. `api/errors.py`：补准入的 404/409/422/429/503 映射，429 带 Retry-After；`main.py` 注册路由，并在关闭数据库/进程锁前取消、等待仍活跃的 SSE 请求收尾。
+
+### 流与错误的约定
+
+- 执行器在响应生命周期中运行，不使用遗留的后台生成任务。等到 `message_start` 才发 SSE 响应头，因此准入失败仍返回正常 HTTP 错误 JSON；重复请求返回 `200 application/json`，不再次调用模型。
+- SSE 响应带 `Content-Type: text/event-stream; charset=utf-8`、`Cache-Control: no-cache, no-store`、`X-Accel-Buffering: no`。无 Content-Length，15 秒无事件时可发 `: ping` 注释心跳。部署代理还必须关闭响应缓冲/压缩缓冲，设置足够的读取超时。
+- 公开事件队列最多 8 条；消费者慢会让生产者等待，单次网络写入超过 15 秒则取消并收尾，避免无限积压。业务的默认 120 秒生成超时仍有效。
+- 检测到断线会取消执行器，等待模型关闭、在途事务结束及最终状态核对；只有确认安全后才释放本会话占用。关闭服务器也先等待这些清理，再释放进程锁。
+- 已确认保存才发送 `message_done`；已确认失败才发送 `message_error`，其中 request_id 与响应头一致。中途结算无法确认时只结束流，不伪造失败或成功；收到 EOF 却没有 done/error，前端必须查询历史，不能立即自动重试。
+- 不支持 SSE 断点续传。断线也可能发生在保存成功之后，历史记录才是最终依据。没有新增公开“重新生成成功回答”接口。
+
+前端需要 `fetch` 发 POST 并读取 `response.body`；原生 EventSource 发 GET，不用于本项目。先看 Content-Type 区分错误/重复 JSON 与 SSE。网络块不等于事件：正确前端必须增量 UTF-8 解码、保留不完整片段，并按空行分隔事件。思考文字与回答分别显示，进度用真实事件，不自行编造。
+
+### 手动观察流（会调用真实模型并消耗余额）
+
+先启动后端，在同一个浏览器的 `/docs` 登录并创建会话。随后在该页面的浏览器开发者控制台运行下面代码，将 `42` 换为自己的会话编号。不需要复制 Cookie 或 API Key。
+
+```javascript
+const sessionId = '42';
+const controller = new AbortController();
+const response = await fetch(`/api/v1/chat/sessions/${sessionId}/messages`, {
+  method: 'POST', credentials: 'same-origin', signal: controller.signal,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ client_message_key: crypto.randomUUID(), content: 'Explain Python lists briefly.' }),
+});
+if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream')) {
+  console.log(await response.json());
+} else {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    console.log(decoder.decode(value, { stream: true }));
+  }
+  console.log(decoder.decode());
+}
+```
+
+这只是观察原始网络文字的演示，不是正式事件解析器或聊天 UI。再次运行会生成新的消息键，是新的付费提问；网络重发应复用原键。重试需先 GET 历史，取最后失败 USER 的 message_id 与 generation.attempt_id，再 POST `{failed_attempt_id: ...}` 到重试路径。已保存成功的回答不能重试。开启 LangSmith 时正式调用沿用原 tracing 配置，可能上传输入与输出；不需要上传时关闭 LANGSMITH_TRACING。
+
+测试：`tests/test_chat_sse.py` 验证真正逐段 ASGI 发送、心跳、限流/错误/重复回执、慢连接、断线、重复取消及 shutdown 清理；`scripts/chat_sse_mysql_cases.py` 使用真实 Deep Agents 图、假供应商流和隔离 MySQL，验证保存、失败重试、跨用户拒绝和断线清理。没有调用真实供应商或上传 trace，不能将其当作真实模型/浏览器部署验收。
+
+本轮新增 17 项离线测试、5 项隔离 MySQL 测试；完整 437 项离线、153 项 MySQL 测试及迁移往返验证通过。临时测试容器和数据已清理。
+
+参考：[MDN SSE 说明](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)。
 
 ## 终端真实聊天入口
 
@@ -943,7 +1112,7 @@ uv run python -m app.agent.check
 
 这次只验证回答，所以在发给模型前隐藏所有工具（仅设置 tools=[] 不会移除框架内置工具）。没有挂载宿主机文件、连接数据库或设置持久化 checkpoint；LangSmith tracing 由上文配置控制，默认关闭。只发送固定测试问题和 Agent 提示，不发送项目文件或数据库内容。工具调用和长期记忆需要后续另外验证。
 
-**终端逐段打印不等于网页 SSE 已完成。** 后面还要让 FastAPI 把这些文字转成 SSE，再让 React 接收并显示。当前网页仍是 /health 检查页面。
+**终端逐段打印不等于网页完成。** FastAPI 的 SSE 现已接通（见“发送消息与失败重试 SSE 接口”），接下来要让 React 接收并显示。当前网页仍是 /health 检查页面。
 
 参考：[DeepSeek 官方调用说明](https://api-docs.deepseek.com/)、[ChatDeepSeek 适配器](https://docs.langchain.com/oss/python/integrations/chat/deepseek)、[Deep Agents 流式输出](https://docs.langchain.com/oss/python/deepagents/streaming)。模型名称以 DeepSeek 官方当前说明为准，适配器文档里的示例名称可能较旧。
 
@@ -970,4 +1139,4 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 uv run python -m unittest discover -s tests -v
 ```
 
-离线健康接口测试注入假的启动环境，不访问数据库或模型；真实启动清理另有隔离 MySQL 验收。现已有注册和登录服务函数，但业务 HTTP 接口仍未接入，不能把 /health 可用等同于网站可注册登录。
+离线健康接口测试注入假的启动环境，不访问数据库或模型；真实启动清理另有隔离 MySQL 验收。四个账号 HTTP 接口已接入，见“账号 HTTP 接口”；前端目前仍只是健康检查页面，不能把后端接口完成等同于登录网页完成。

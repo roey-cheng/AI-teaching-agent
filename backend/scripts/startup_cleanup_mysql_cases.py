@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.agent.input_policy import policy_for_model
 from app.core.runtime import open_backend_runtime
 from app.core.runtime_lock import RuntimeAlreadyActiveError, RuntimeLock
+from app.core.http_config import HTTPSettings
 from app.db.session import build_session_factory
 from app.main import create_app
 from app.models import AgentMemory, AuthSession, ChatSession, Message, User
@@ -222,7 +223,8 @@ class StartupCleanupMySQLTest(unittest.TestCase):
 
     def test_real_fastapi_startup_cleans_before_serving_and_holds_runtime_lock(self):
         self.question()
-        app = create_app(runtime_factory=lambda: open_backend_runtime(self.engine, lock=self.lock))
+        app = create_app(runtime_factory=lambda: open_backend_runtime(self.engine, lock=self.lock),
+                         http_settings=HTTPSettings(_env_file=None))
         with TestClient(app) as client:
             self.assertEqual(client.get("/health").json(), {"status": "ok"})
             self.assertEqual(self.messages()[0].generation_status, "FAILED")

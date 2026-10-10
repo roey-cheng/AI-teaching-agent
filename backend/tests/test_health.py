@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from app.core.http_config import HTTPSettings
 from app.main import create_app
 from app.services.startup_cleanup import StartupCleanupResult
 
@@ -14,7 +15,7 @@ class HealthTest(unittest.TestCase):
         def fake_runtime():
             yield SimpleNamespace(cleanup=StartupCleanupResult())
 
-        app = create_app(runtime_factory=fake_runtime)
+        app = create_app(runtime_factory=fake_runtime, http_settings=HTTPSettings(_env_file=None))
         with TestClient(app) as client:
             response = client.get("/health")
 

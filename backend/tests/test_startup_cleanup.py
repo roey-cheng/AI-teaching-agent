@@ -16,6 +16,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core.http_config import HTTPSettings
 from app.core.runtime import open_backend_runtime
 from app.core.runtime_lock import RuntimeAlreadyActiveError, RuntimeLock, RuntimeLockError
 from app.main import create_app
@@ -207,7 +208,7 @@ class WebStartupTest(unittest.TestCase):
             finally:
                 events.append("closed")
 
-        app = create_app(runtime_factory=scope)
+        app = create_app(runtime_factory=scope, http_settings=HTTPSettings(_env_file=None))
         with TestClient(app) as client:
             self.assertEqual(events, ["started"])
             self.assertIs(app.state.runtime, runtime)
@@ -221,7 +222,7 @@ class WebStartupTest(unittest.TestCase):
             raise StartupCleanupError()
             yield  # pragma: no cover -- contextmanager 的失败进入路径。
 
-        app = create_app(runtime_factory=scope)
+        app = create_app(runtime_factory=scope, http_settings=HTTPSettings(_env_file=None))
         with self.assertRaises(StartupCleanupError), TestClient(app):
             self.fail("Must not serve")
         self.assertFalse(hasattr(app.state, "runtime"))
@@ -241,7 +242,7 @@ class WebStartupCancellationTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 closed.set()
 
-        app = create_app(runtime_factory=scope)
+        app = create_app(runtime_factory=scope, http_settings=HTTPSettings(_env_file=None))
 
         async def start():
             async with app.router.lifespan_context(app):
