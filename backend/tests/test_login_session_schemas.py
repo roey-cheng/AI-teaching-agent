@@ -28,11 +28,20 @@ class LoginSchemaTest(unittest.TestCase):
         self.assertEqual(login.password.get_secret_value(), data["password"])
 
     def test_login_password_checks_format_not_new_password_strength(self):
-        for length, valid in ((0, False), (1, True), (7, True), (8, True), (128, True), (129, False)):
+        for length, valid in (
+            (0, False),
+            (1, True),
+            (7, True),
+            (8, True),
+            (128, True),
+            (129, False),
+        ):
             with self.subTest(length=length):
                 data = {"email": "student@example.com", "password": "A" * length}
                 if valid:
-                    self.assertEqual(LoginRequest.model_validate(data).password.get_secret_value(), "A" * length)
+                    self.assertEqual(
+                        LoginRequest.model_validate(data).password.get_secret_value(), "A" * length
+                    )
                 else:
                     with self.assertRaises(ValidationError):
                         LoginRequest.model_validate(data)
@@ -41,9 +50,14 @@ class LoginSchemaTest(unittest.TestCase):
         data = {"email": "student@example.com", "password": "Fake-password"}
         for field in data:
             with self.subTest(field=field, missing=True), self.assertRaises(ValidationError):
-                LoginRequest.model_validate({key: value for key, value in data.items() if key != field})
+                LoginRequest.model_validate(
+                    {key: value for key, value in data.items() if key != field}
+                )
             for bad in (None, True, 12345678, [], {}, b"abcdefgh"):
-                with self.subTest(field=field, bad_type=type(bad).__name__), self.assertRaises(ValidationError):
+                with (
+                    self.subTest(field=field, bad_type=type(bad).__name__),
+                    self.assertRaises(ValidationError),
+                ):
                     LoginRequest.model_validate(data | {field: bad})
 
     def test_login_rejects_invalid_email_and_unknown_fields(self):
@@ -57,9 +71,14 @@ class LoginSchemaTest(unittest.TestCase):
 
     def test_login_password_is_masked_and_json_input_is_supported(self):
         secret = "Fake-password"
-        request = LoginRequest.model_validate_json(json.dumps({
-            "email": "student@example.com", "password": secret,
-        }))
+        request = LoginRequest.model_validate_json(
+            json.dumps(
+                {
+                    "email": "student@example.com",
+                    "password": secret,
+                }
+            )
+        )
         self.assertNotIn(secret, repr(request))
         self.assertNotIn(secret, request.model_dump_json())
         self.assertEqual(json.loads(request.model_dump_json())["password"], "**********")
@@ -68,14 +87,27 @@ class LoginSchemaTest(unittest.TestCase):
         self.assertNotIn(secret, str(captured.exception))
 
     def test_login_response_wraps_public_user_and_excludes_credentials(self):
-        user = User(user_id=123, email="student@example.com", display_name="小雨",
-                    password_hash="fake-hash", system_role="USER", status="ACTIVE")
-        payload = LoginResponse.model_validate({
-            "user": user, "token": "fake-token", "cookie": "fake-cookie",
-        }).model_dump(mode="json")
-        self.assertEqual(payload, {
-            "user": {"user_id": "123", "email": "student@example.com", "display_name": "小雨"},
-        })
+        user = User(
+            user_id=123,
+            email="student@example.com",
+            display_name="小雨",
+            password_hash="fake-hash",
+            system_role="USER",
+            status="ACTIVE",
+        )
+        payload = LoginResponse.model_validate(
+            {
+                "user": user,
+                "token": "fake-token",
+                "cookie": "fake-cookie",
+            }
+        ).model_dump(mode="json")
+        self.assertEqual(
+            payload,
+            {
+                "user": {"user_id": "123", "email": "student@example.com", "display_name": "小雨"},
+            },
+        )
         with self.assertRaises(ValidationError):
             LoginResponse.model_validate(payload["user"])  # 不能忘记外层 user。
 
@@ -93,7 +125,15 @@ class SessionRequestTest(unittest.TestCase):
     def test_create_session_accepts_only_empty_object(self):
         self.assertEqual(CreateSessionRequest.model_validate({}).model_dump(), {})
         self.assertEqual(CreateSessionRequest.model_validate_json("{}").model_dump(), {})
-        for value in (None, [], "", 1, {"user_id": "123"}, {"title": "hello"}, {"status": "ARCHIVED"}):
+        for value in (
+            None,
+            [],
+            "",
+            1,
+            {"user_id": "123"},
+            {"title": "hello"},
+            {"status": "ARCHIVED"},
+        ):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 CreateSessionRequest.model_validate(value)
 
@@ -102,18 +142,31 @@ class SessionRequestTest(unittest.TestCase):
         self.assertEqual(request.title, "Python  basics")
 
     def test_rename_checks_length_after_trimming(self):
-        for title, valid in (("", False), (" \n\t", False), ("雨", True),
-                             (" " + "雨" * 100 + " ", True), ("雨" * 101, False)):
+        for title, valid in (
+            ("", False),
+            (" \n\t", False),
+            ("雨", True),
+            (" " + "雨" * 100 + " ", True),
+            ("雨" * 101, False),
+        ):
             with self.subTest(length=len(title)):
                 if valid:
-                    self.assertEqual(RenameSessionRequest.model_validate({"title": title}).title, title.strip())
+                    self.assertEqual(
+                        RenameSessionRequest.model_validate({"title": title}).title, title.strip()
+                    )
                 else:
                     with self.assertRaises(ValidationError):
                         RenameSessionRequest.model_validate({"title": title})
 
     def test_rename_requires_string_title_and_rejects_extra_fields(self):
-        for value in ({}, {"title": None}, {"title": 123}, {"title": True}, {"title": []},
-                      {"title": b"hello"}):
+        for value in (
+            {},
+            {"title": None},
+            {"title": 123},
+            {"title": True},
+            {"title": []},
+            {"title": b"hello"},
+        ):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 RenameSessionRequest.model_validate(value)
         for field in ("status", "user_id", "session_id", "title_is_manual", "last_activity_at"):
@@ -130,9 +183,13 @@ class SessionRequestTest(unittest.TestCase):
 class SessionResponseTest(unittest.TestCase):
     def session(self, **overrides):
         values = {
-            "chat_session_id": 1001, "user_id": 123, "title": "Python basics",
-            "title_is_manual": True, "created_at": datetime(2026, 9, 24, 8),
-            "updated_at": datetime(2026, 9, 24, 9), "last_activity_at": datetime(2026, 9, 24, 8, 30),
+            "chat_session_id": 1001,
+            "user_id": 123,
+            "title": "Python basics",
+            "title_is_manual": True,
+            "created_at": datetime(2026, 9, 24, 8),
+            "updated_at": datetime(2026, 9, 24, 9),
+            "last_activity_at": datetime(2026, 9, 24, 8, 30),
         }
         return ChatSession(**(values | overrides))
 
@@ -140,8 +197,10 @@ class SessionResponseTest(unittest.TestCase):
         session = self.session()
         response = SessionResponse.model_validate(session)
         expected = {
-            "session_id": "1001", "title": "Python basics",
-            "created_at": "2026-09-24T08:00:00Z", "updated_at": "2026-09-24T09:00:00Z",
+            "session_id": "1001",
+            "title": "Python basics",
+            "created_at": "2026-09-24T08:00:00Z",
+            "updated_at": "2026-09-24T09:00:00Z",
             "last_activity_at": "2026-09-24T08:30:00Z",
         }
         self.assertEqual(response.model_dump(mode="json"), expected)
@@ -158,7 +217,10 @@ class SessionResponseTest(unittest.TestCase):
     def test_large_ids_preserve_precision_and_bad_ids_are_rejected(self):
         for value in (9007199254740993, 18446744073709551615, "18446744073709551615"):
             with self.subTest(value=value):
-                self.assertEqual(SessionResponse.model_validate(self.session(chat_session_id=value)).session_id, str(value))
+                self.assertEqual(
+                    SessionResponse.model_validate(self.session(chat_session_id=value)).session_id,
+                    str(value),
+                )
         for value in (None, 0, -1, True, 1.5, "bad", "001", 18446744073709551616):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 SessionResponse.model_validate(self.session(chat_session_id=value))
@@ -174,10 +236,17 @@ class SessionResponseTest(unittest.TestCase):
                     SessionResponse.model_validate(self.session(**{field: None}))
 
     def test_list_supports_empty_and_nested_orm_objects_without_sorting(self):
-        self.assertEqual(SessionListResponse(items=[]).model_dump(mode="json"), {"items": []})
-        response = SessionListResponse.model_validate({"items": [
-            self.session(chat_session_id=2), self.session(chat_session_id=1),
-        ]})
+        self.assertEqual(
+            SessionListResponse.model_validate({"items": []}).model_dump(mode="json"), {"items": []}
+        )
+        response = SessionListResponse.model_validate(
+            {
+                "items": [
+                    self.session(chat_session_id=2),
+                    self.session(chat_session_id=1),
+                ]
+            }
+        )
         self.assertEqual([item.session_id for item in response.items], ["2", "1"])
         self.assertEqual(set(response.model_dump(mode="json")), {"items"})
         for data in ({}, {"items": None}, {"items": {}}, {"items": [None]}, {"items": [{}]}):

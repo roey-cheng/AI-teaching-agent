@@ -35,7 +35,9 @@ def login_user(
         # 只读取验证所需数据；密码核对在关闭读取 Session 后执行。
         with session_factory() as session:
             snapshot = session.execute(
-                select(User.user_id, User.password_hash, User.status).where(User.email == request.email)
+                select(User.user_id, User.password_hash, User.status).where(
+                    User.email == request.email
+                )
             ).one_or_none()
 
         stored_hash = snapshot.password_hash if snapshot is not None else DUMMY_PASSWORD_HASH
@@ -52,7 +54,9 @@ def login_user(
 
         with session_factory.begin() as session:
             # 密码验证耗时期间，账号可能被禁用或改密。短事务内锁定并复核快照。
-            user = session.scalar(select(User).where(User.user_id == snapshot.user_id).with_for_update())
+            user = session.scalar(
+                select(User).where(User.user_id == snapshot.user_id).with_for_update()
+            )
             if user is None or user.status != "ACTIVE" or user.password_hash != stored_hash:
                 raise InvalidCredentialsError()
             now = datetime.now(UTC).replace(tzinfo=None)
@@ -62,18 +66,30 @@ def login_user(
                 # 凭据本身证明持有权；切换账号时也可以撤销该浏览器原账号的凭据。
                 session.execute(
                     update(AuthSession)
-                    .where(AuthSession.token_hash == old_hash, AuthSession.revoked_at.is_(None),
-                           AuthSession.expires_at > now)
+                    .where(
+                        AuthSession.token_hash == old_hash,
+                        AuthSession.revoked_at.is_(None),
+                        AuthSession.expires_at > now,
+                    )
                     .values(revoked_at=now)
                 )
             user.last_login_at = now
             user.updated_at = now
-            session.add(AuthSession(user_id=user.user_id, token_hash=token_hash,
-                                    created_at=now, expires_at=expires_at, revoked_at=None))
+            session.add(
+                AuthSession(
+                    user_id=user.user_id,
+                    token_hash=token_hash,
+                    created_at=now,
+                    expires_at=expires_at,
+                    revoked_at=None,
+                )
+            )
             session.flush()
-            response = LoginResponse(user=UserResponse.model_validate(user))
+            response = LoginResponse.model_validate({"user": UserResponse.model_validate(user)})
         # 只有上述修改一起提交成功，才把 Cookie 所需的原凭据交给接口层。
-        return LoginResult(response=response, token=token, expires_at=expires_at.replace(tzinfo=UTC))
+        return LoginResult(
+            response=response, token=token, expires_at=expires_at.replace(tzinfo=UTC)
+        )
     except SQLAlchemyError:
         # 不自动重试、不返回尚未确认提交的凭据；不输出 SQL/原始异常/哈希。
         raise LoginUnavailableError() from None

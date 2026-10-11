@@ -3,7 +3,7 @@
 import unittest
 from collections import Counter
 
-from sqlalchemy import CheckConstraint, UniqueConstraint
+from sqlalchemy import CheckConstraint, DefaultClause, String, Table, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.dialects.mysql import BIGINT, CHAR, DATETIME, LONGTEXT, TEXT, VARCHAR
 from sqlalchemy.orm import configure_mappers
@@ -12,13 +12,14 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from app.db.base import Base
 from app.models import AgentMemory, AuthSession, ChatSession, Message, User
 from app.models.agent_memory import MEMORY_TOPIC_TYPES
+from testing_support import require_type
 
 
 def checks_for(model):
     """把 CHECK 文本的换行压成空格，方便验证；不会执行检查表达式。"""
     return {
         constraint.name: " ".join(str(constraint.sqltext).split())
-        for constraint in model.__table__.constraints
+        for constraint in require_type(model.__table__, Table).constraints
         if isinstance(constraint, CheckConstraint)
     }
 
@@ -30,7 +31,7 @@ class ChatModelsTest(unittest.TestCase):
         self.assertEqual(set(Base.metadata.tables), {model.__tablename__ for model in models})
         for model in models:
             with self.subTest(model=model.__name__):
-                self.assertIs(model.__table__.metadata, Base.metadata)
+                self.assertIs(require_type(model.__table__, Table).metadata, Base.metadata)
 
     def test_columns_and_nullability_match_design(self):
         definitions = {
@@ -43,12 +44,21 @@ class ChatModelsTest(unittest.TestCase):
                 set(),
             ),
             Message: (
-                "message_id chat_session_id role content in_reply_to_message_id client_message_key "
-                "model_key created_at updated_at attempt_id retry_of_attempt_id generation_status "
-                "generation_error_code generation_error_message",
-                {"in_reply_to_message_id", "client_message_key", "model_key", "attempt_id",
-                 "retry_of_attempt_id", "generation_status", "generation_error_code",
-                 "generation_error_message"},
+                (
+                    "message_id chat_session_id role content in_reply_to_message_id client_message_key "
+                    "model_key created_at updated_at attempt_id retry_of_attempt_id generation_status "
+                    "generation_error_code generation_error_message"
+                ),
+                {
+                    "in_reply_to_message_id",
+                    "client_message_key",
+                    "model_key",
+                    "attempt_id",
+                    "retry_of_attempt_id",
+                    "generation_status",
+                    "generation_error_code",
+                    "generation_error_message",
+                },
             ),
             AgentMemory: (
                 "memory_id user_id memory_key memory_type summary created_at updated_at",
@@ -57,10 +67,13 @@ class ChatModelsTest(unittest.TestCase):
         }
         for model, (names, nullable) in definitions.items():
             with self.subTest(model=model.__name__):
-                columns = model.__table__.columns
+                columns = require_type(model.__table__, Table).columns
                 self.assertEqual(list(columns.keys()), names.split())
                 self.assertEqual({column.name for column in columns if column.nullable}, nullable)
-                self.assertEqual(list(model.__table__.primary_key.columns.keys()), [names.split()[0]])
+                self.assertEqual(
+                    list(require_type(model.__table__, Table).primary_key.columns.keys()),
+                    [names.split()[0]],
+                )
 
     def test_ids_and_foreign_keys_use_unsigned_bigint_and_restrict(self):
         expected = {
@@ -74,7 +87,7 @@ class ChatModelsTest(unittest.TestCase):
         for table in Base.metadata.tables.values():
             for column in table.columns:
                 if column.primary_key or column.foreign_keys:
-                    self.assertIsInstance(column.type, BIGINT)
+                    assert isinstance(column.type, BIGINT)
                     self.assertTrue(column.type.unsigned)
                 if column.primary_key:
                     self.assertTrue(column.autoincrement)
@@ -86,15 +99,18 @@ class ChatModelsTest(unittest.TestCase):
                     # 访问 .column 会实际解析目标，发现拼错表名/字段名时测试会失败。
                     self.assertIs(foreign_key.column.table.metadata, Base.metadata)
         self.assertEqual(actual, expected)
-        self.assertFalse(Message.__table__.c.retry_of_attempt_id.foreign_keys)
+        self.assertFalse(require_type(Message.__table__, Table).c.retry_of_attempt_id.foreign_keys)
 
     def test_unique_constraints_match_design(self):
         expected = {
             "users": {("email",)},
             "auth_sessions": {("token_hash",)},
             "chat_sessions": set(),
-            "messages": {("chat_session_id", "client_message_key"),
-                         ("in_reply_to_message_id",), ("attempt_id",)},
+            "messages": {
+                ("chat_session_id", "client_message_key"),
+                ("in_reply_to_message_id",),
+                ("attempt_id",),
+            },
             "agent_memory": {("user_id", "memory_key")},
         }
         for table_name, unique_columns in expected.items():
@@ -111,8 +127,10 @@ class ChatModelsTest(unittest.TestCase):
             "users": set(),
             "auth_sessions": {("user_id", "expires_at")},
             "chat_sessions": {("user_id", "last_activity_at", "chat_session_id")},
-            "messages": {("chat_session_id", "created_at", "message_id"),
-                         ("generation_status", "message_id")},
+            "messages": {
+                ("chat_session_id", "created_at", "message_id"),
+                ("generation_status", "message_id"),
+            },
             "agent_memory": {("user_id", "updated_at", "memory_id")},
         }
         for table_name, indexes in expected.items():
@@ -135,53 +153,100 @@ class ChatModelsTest(unittest.TestCase):
         }
         for (model, name), (column_type, length) in expected.items():
             with self.subTest(model=model.__name__, column=name):
-                actual = model.__table__.c[name].type
-                self.assertIsInstance(actual, column_type)
+                actual = require_type(model.__table__, Table).c[name].type
+                assert isinstance(actual, column_type)
                 self.assertEqual(actual.length, length)
                 self.assertEqual(actual.charset, "ascii")
                 self.assertEqual(actual.collation, "ascii_bin")
-        self.assertIsInstance(Message.__table__.c.content.type, LONGTEXT)
-        self.assertIsInstance(AgentMemory.__table__.c.summary.type, TEXT)
-        self.assertEqual(Message.__table__.c.generation_error_message.type.length, 500)
-        self.assertEqual(Message.__table__.c.model_key.type.length, 128)
-        self.assertEqual(ChatSession.__table__.c.title.type.length, 100)
+        assert isinstance(require_type(Message.__table__, Table).c.content.type, LONGTEXT)
+        assert isinstance(require_type(AgentMemory.__table__, Table).c.summary.type, TEXT)
+        self.assertEqual(
+            require_type(
+                require_type(Message.__table__, Table).c.generation_error_message.type, String
+            ).length,
+            500,
+        )
+        self.assertEqual(
+            require_type(require_type(Message.__table__, Table).c.model_key.type, String).length,
+            128,
+        )
+        self.assertEqual(
+            require_type(require_type(ChatSession.__table__, Table).c.title.type, String).length,
+            100,
+        )
 
     def test_auth_and_chat_checks_and_defaults(self):
-        self.assertEqual(checks_for(AuthSession), {
-            "ck_auth_sessions_expiry": "expires_at > created_at",
-            "ck_auth_sessions_revocation": "revoked_at IS NULL OR revoked_at >= created_at",
-        })
-        self.assertEqual(checks_for(ChatSession), {
-            "ck_chat_sessions_title": "CHAR_LENGTH(title) BETWEEN 1 AND 100",
-            "ck_chat_sessions_manual_title": "title_is_manual IN (0, 1)",
-        })
-        self.assertEqual(ChatSession.__table__.c.title.server_default.arg, "新对话")
-        self.assertEqual(str(ChatSession.__table__.c.title_is_manual.server_default.arg), "0")
+        self.assertEqual(
+            checks_for(AuthSession),
+            {
+                "ck_auth_sessions_expiry": "expires_at > created_at",
+                "ck_auth_sessions_revocation": "revoked_at IS NULL OR revoked_at >= created_at",
+            },
+        )
+        self.assertEqual(
+            checks_for(ChatSession),
+            {
+                "ck_chat_sessions_title": "CHAR_LENGTH(title) BETWEEN 1 AND 100",
+                "ck_chat_sessions_manual_title": "title_is_manual IN (0, 1)",
+            },
+        )
+        self.assertEqual(
+            require_type(
+                require_type(ChatSession.__table__, Table).c.title.server_default, DefaultClause
+            ).arg,
+            "新对话",
+        )
+        self.assertEqual(
+            str(
+                require_type(
+                    require_type(ChatSession.__table__, Table).c.title_is_manual.server_default,
+                    DefaultClause,
+                ).arg
+            ),
+            "0",
+        )
 
     def test_message_checks_explicitly_guard_nulls_and_roles(self):
         checks = checks_for(Message)
-        self.assertEqual(set(checks), {
-            "ck_messages_role", "ck_messages_content_not_empty",
-            "ck_messages_user_content_length", "ck_messages_role_fields",
-        })
+        self.assertEqual(
+            set(checks),
+            {
+                "ck_messages_role",
+                "ck_messages_content_not_empty",
+                "ck_messages_user_content_length",
+                "ck_messages_role_fields",
+            },
+        )
         self.assertEqual(checks["ck_messages_role"], "role IN ('USER', 'ASSISTANT')")
         self.assertEqual(checks["ck_messages_content_not_empty"], "CHAR_LENGTH(content) > 0")
-        self.assertEqual(checks["ck_messages_user_content_length"],
-                         "role <> 'USER' OR CHAR_LENGTH(content) <= 20000")
+        self.assertEqual(
+            checks["ck_messages_user_content_length"],
+            "role <> 'USER' OR CHAR_LENGTH(content) <= 20000",
+        )
         rule = checks["ck_messages_role_fields"]
         user_rule, assistant_rule = rule.split("OR (role = 'ASSISTANT'", 1)
-        for name in ("client_message_key", "attempt_id", "generation_status",
-                     "generation_error_code", "generation_error_message"):
+        for name in (
+            "client_message_key",
+            "attempt_id",
+            "generation_status",
+            "generation_error_code",
+            "generation_error_message",
+        ):
             self.assertIn(f"{name} IS NOT NULL", user_rule)
             self.assertIn(f"{name} IS NULL", assistant_rule)
         for fragment in (
-            "role = 'USER'", "in_reply_to_message_id IS NULL", "model_key IS NULL",
+            "role = 'USER'",
+            "in_reply_to_message_id IS NULL",
+            "model_key IS NULL",
             "generation_status IN ('RUNNING', 'SUCCEEDED', 'FAILED')",
             "retry_of_attempt_id IS NULL OR retry_of_attempt_id <> attempt_id",
-            "generation_status = 'FAILED'", "CHAR_LENGTH(generation_error_code) > 0",
+            "generation_status = 'FAILED'",
+            "CHAR_LENGTH(generation_error_code) > 0",
             "CHAR_LENGTH(generation_error_message) > 0",
-            "generation_status IN ('RUNNING', 'SUCCEEDED') AND generation_error_code IS NULL "
-            "AND generation_error_message IS NULL",
+            (
+                "generation_status IN ('RUNNING', 'SUCCEEDED') AND generation_error_code IS NULL "
+                "AND generation_error_message IS NULL"
+            ),
         ):
             self.assertIn(fragment, user_rule)
         self.assertIn("retry_of_attempt_id IS NULL", assistant_rule)
@@ -211,24 +276,35 @@ class ChatModelsTest(unittest.TestCase):
         expected = {key: category for category, keys in groups.items() for key in keys.split()}
         self.assertEqual(dict(MEMORY_TOPIC_TYPES), expected)
         self.assertEqual(len(MEMORY_TOPIC_TYPES), 25)
-        self.assertEqual(Counter(MEMORY_TOPIC_TYPES.values()), {
-            "LEARNING_PREFERENCE": 8, "LEARNING_GOAL": 2, "PROGRAMMING_BACKGROUND": 5,
-            "PERSONAL_BACKGROUND": 6, "DAILY_PREFERENCE": 4,
-        })
+        self.assertEqual(
+            Counter(MEMORY_TOPIC_TYPES.values()),
+            {
+                "LEARNING_PREFERENCE": 8,
+                "LEARNING_GOAL": 2,
+                "PROGRAMMING_BACKGROUND": 5,
+                "PERSONAL_BACKGROUND": 6,
+                "DAILY_PREFERENCE": 4,
+            },
+        )
         checks = checks_for(AgentMemory)
-        self.assertEqual(checks["ck_agent_memory_summary"], "CHAR_LENGTH(summary) BETWEEN 1 AND 500")
+        self.assertEqual(
+            checks["ck_agent_memory_summary"], "CHAR_LENGTH(summary) BETWEEN 1 AND 500"
+        )
         # 每个 OR 分支必须同时匹配 key 和 type，不能让合法 key 搭配错误分类。
-        self.assertEqual(set(checks["ck_agent_memory_topic_type"].split(" OR ")), {
-            f"(memory_key = '{key}' AND memory_type = '{category}')"
-            for key, category in expected.items()
-        })
+        self.assertEqual(
+            set(checks["ck_agent_memory_topic_type"].split(" OR ")),
+            {
+                f"(memory_key = '{key}' AND memory_type = '{category}')"
+                for key, category in expected.items()
+            },
+        )
 
     def test_time_columns_are_explicit_utc_values_not_automatic_updates(self):
         for table in Base.metadata.tables.values():
             for column in table.columns:
                 if column.name.endswith("_at"):
                     with self.subTest(table=table.name, column=column.name):
-                        self.assertIsInstance(column.type, DATETIME)
+                        assert isinstance(column.type, DATETIME)
                         self.assertEqual(column.type.fsp, 6)
                         self.assertIsNone(column.default)
                         self.assertIsNone(column.server_default)

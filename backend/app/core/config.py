@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -8,7 +8,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BACKEND_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
-class DatabaseSettings(BaseSettings):
+class EnvironmentSettings(BaseSettings):
+    @classmethod
+    def from_sources(cls, **overrides: Any) -> Self:
+        """读取环境配置并校验；入参是尚未校验的数据，允许 Settings 的 _env_file 等选项。"""
+        return cls(**overrides)
+
+
+class DatabaseSettings(EnvironmentSettings):
     """把本地 DB_* 配置读取为 Python 可使用的数据，并检查格式。"""
 
     model_config = SettingsConfigDict(
@@ -37,10 +44,10 @@ class DatabaseSettings(BaseSettings):
 def load_database_settings() -> DatabaseSettings:
     # 调用时才读取配置；仅仅 import 本文件不会读取密码或连接数据库。
     # 同名环境变量优先于 .env，便于之后部署；正常本地开发无需额外设置。
-    return DatabaseSettings()
+    return DatabaseSettings.from_sources()
 
 
-class ModelSettings(BaseSettings):
+class ModelSettings(EnvironmentSettings):
     """只读取 MODEL_*；填写配置本身不会发送模型请求。"""
 
     model_config = SettingsConfigDict(
@@ -55,13 +62,17 @@ class ModelSettings(BaseSettings):
     name: str = Field(min_length=1)
     api_key: SecretStr
     # 这个探针只允许官方地址，避免拼错地址时把密钥送到别的网站。
-    base_url: Literal["https://api.deepseek.com", "https://api.deepseek.com/v1"] = "https://api.deepseek.com"
+    base_url: Literal["https://api.deepseek.com", "https://api.deepseek.com/v1"] = (
+        "https://api.deepseek.com"
+    )
 
     @field_validator("name")
     @classmethod
     def name_must_not_be_blank(cls, value: str) -> str:
         if not value.strip() or value != value.strip():
-            raise ValueError("MODEL_NAME must not be blank or contain leading or trailing whitespace")
+            raise ValueError(
+                "MODEL_NAME must not be blank or contain leading or trailing whitespace"
+            )
         return value
 
     @field_validator("api_key")
@@ -74,15 +85,18 @@ class ModelSettings(BaseSettings):
 
 
 def load_model_settings() -> ModelSettings:
-    return ModelSettings()
+    return ModelSettings.from_sources()
 
 
-class TracingSettings(BaseSettings):
+class TracingSettings(EnvironmentSettings):
     """LangSmith tracing 配置；读取配置不上传记录，默认关闭。"""
 
     model_config = SettingsConfigDict(
-        env_file=BACKEND_ENV_FILE, env_file_encoding="utf-8", env_prefix="LANGSMITH_",
-        extra="ignore", hide_input_in_errors=True,
+        env_file=BACKEND_ENV_FILE,
+        env_file_encoding="utf-8",
+        env_prefix="LANGSMITH_",
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
     tracing: bool = False

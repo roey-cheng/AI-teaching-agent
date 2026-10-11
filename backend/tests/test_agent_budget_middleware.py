@@ -1,27 +1,31 @@
 """使用假的 handler 测试调用前检查；不调用任何供应商。"""
 
-from dataclasses import replace
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
+from deepagents.middleware.memory import MemoryState
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.runtime import Runtime
 
 from app.agent.budget_middleware import AgentToolUseNotAllowedError, ChatMemoryBudgetMiddleware
 from app.agent.input_policy import policy_for_model
 from app.agent.memory_backend import PROFILE_MEMORY_PATH, ProfileMemoryBackend
 from app.services.errors import ContextTooLargeError
+from testing_support import require_value
 
 
 def middleware_and_request(policy=None, memory="喜欢中文"):
     policy = policy or policy_for_model("deepseek-v4-pro")
     middleware = ChatMemoryBudgetMiddleware(ProfileMemoryBackend(memory), policy)
     request = ModelRequest(
-        model=FakeListChatModel(responses=["unused"]), messages=[HumanMessage(content="question")],
+        model=FakeListChatModel(responses=["unused"]),
+        messages=[HumanMessage(content="question")],
         system_message=SystemMessage(content=policy.system_prompt),
         tools=[{"name": "execute"}, {"name": "task"}],
-        state={"messages": [], "memory_contents": {PROFILE_MEMORY_PATH: memory}},
+        state=MemoryState(messages=[], memory_contents={PROFILE_MEMORY_PATH: memory}),
         model_settings={"max_tokens": 99},
     )
     return middleware, request
@@ -53,7 +57,9 @@ class ChatBudgetTest(unittest.TestCase):
             handler = Mock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
             middleware.wrap_model_call(request, handler)
             if where == "system":
-                request = request.override(system_message=SystemMessage(content="framework" * 10_000))
+                request = request.override(
+                    system_message=SystemMessage(content="framework" * 10_000)
+                )
             else:
                 request = request.override(messages=[HumanMessage(content="user" * 20_000)])
             with self.subTest(where=where), self.assertRaises(ContextTooLargeError):
@@ -62,7 +68,9 @@ class ChatBudgetTest(unittest.TestCase):
 
     def test_fake_model_tool_call_is_rejected(self):
         middleware, request = middleware_and_request()
-        answer = AIMessage(content="", tool_calls=[{"name": "task", "args": {"private": "data"}, "id": "call1"}])
+        answer = AIMessage(
+            content="", tool_calls=[{"name": "task", "args": {"private": "data"}, "id": "call1"}]
+        )
         with self.assertRaises(AgentToolUseNotAllowedError) as caught:
             middleware.wrap_model_call(request, Mock(return_value=ModelResponse(result=[answer])))
         self.assertNotIn("private", str(caught.exception))
@@ -76,12 +84,22 @@ class ChatBudgetTest(unittest.TestCase):
 
     def test_caller_cannot_supply_another_memory(self):
         middleware, _ = middleware_and_request(memory="bound profile")
-        result = middleware.before_agent({"memory_contents": {PROFILE_MEMORY_PATH: "forged"}}, None, {})
-        self.assertEqual(result["memory_contents"], {PROFILE_MEMORY_PATH: "bound profile"})
+        result = middleware.before_agent(
+            MemoryState(messages=[], memory_contents={PROFILE_MEMORY_PATH: "forged"}), Runtime(), {}
+        )
+        self.assertEqual(
+            require_value(result)["memory_contents"], {PROFILE_MEMORY_PATH: "bound profile"}
+        )
 
     def test_small_valid_policy_rejects_real_request(self):
-        policy = replace(policy_for_model("deepseek-v4-pro"), app_context_tokens=300,
-                         output_tokens=20, framework_reserve_tokens=0, tool_result_reserve_tokens=0, safety_tokens=0)
+        policy = replace(
+            policy_for_model("deepseek-v4-pro"),
+            app_context_tokens=300,
+            output_tokens=20,
+            framework_reserve_tokens=0,
+            tool_result_reserve_tokens=0,
+            safety_tokens=0,
+        )
         middleware, request = middleware_and_request(policy)
         with self.assertRaises(ContextTooLargeError):
             middleware.modify_request(request)
@@ -90,13 +108,17 @@ class ChatBudgetTest(unittest.TestCase):
 class AsyncChatBudgetTest(unittest.IsolatedAsyncioTestCase):
     async def test_async_read_budget_and_tool_checks(self):
         middleware, request = middleware_and_request()
-        loaded = await middleware.abefore_agent({"memory_contents": {}}, None, {})
-        self.assertIn("喜欢中文", loaded["memory_contents"][PROFILE_MEMORY_PATH])
+        loaded = await middleware.abefore_agent(
+            MemoryState(messages=[], memory_contents={}), Runtime(), {}
+        )
+        self.assertIn("喜欢中文", require_value(loaded)["memory_contents"][PROFILE_MEMORY_PATH])
         handler = AsyncMock(return_value=ModelResponse(result=[AIMessage(content="ok")]))
         await middleware.awrap_model_call(request, handler)
         self.assertEqual(handler.call_args.args[0].tools, [])
         with self.assertRaises(ContextTooLargeError):
-            await middleware.awrap_model_call(request.override(messages=[HumanMessage(content="x" * 70_000)]), handler)
+            await middleware.awrap_model_call(
+                request.override(messages=[HumanMessage(content="x" * 70_000)]), handler
+            )
         self.assertEqual(handler.await_count, 1)
         tool_handler = AsyncMock()
         with self.assertRaises(AgentToolUseNotAllowedError):

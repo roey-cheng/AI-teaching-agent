@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager, contextmanager
 # LangSmith 的实际接入位置；不把 settings 对象作为 trace 的输入。
 from langsmith import Client, tracing_context
 
-from app.core.config import TracingSettings
 from app.core.async_work import complete_in_thread
+from app.core.config import TracingSettings
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,10 @@ def agent_tracing(settings: TracingSettings) -> Iterator[None]:
     if api_key is None:
         raise ValueError("LANGSMITH_API_KEY is required when tracing is enabled")
     client = Client(
-        api_key=api_key.get_secret_value(), api_url=settings.endpoint,
-        workspace_id=settings.workspace_id, timeout_ms=5000,
+        api_key=api_key.get_secret_value(),
+        api_url=settings.endpoint,
+        workspace_id=settings.workspace_id,
+        timeout_ms=5000,
     )
     try:
         # LangGraph/模型已有 tracing 集成，不要给包含密钥的工厂参数额外加 @traceable。
@@ -40,8 +42,10 @@ def agent_tracing(settings: TracingSettings) -> Iterator[None]:
         # CLI 退出前给后台上传收尾；失败不覆盖原来的 Agent 异常，且不打印原始异常或密钥。
         try:
             client.close(timeout=5)
-        except Exception:
-            logger.warning("LangSmith tracing cleanup failed. Check tracing configuration and connectivity.")
+        except Exception:  # noqa: BLE001 -- 上传收尾必须隔离任意 SDK 异常，不能覆盖聊天结果或原异常。
+            logger.warning(
+                "LangSmith tracing cleanup failed. Check tracing configuration and connectivity."
+            )
 
 
 @asynccontextmanager
@@ -53,15 +57,23 @@ async def async_agent_tracing(settings: TracingSettings) -> AsyncIterator[None]:
         return
     if settings.api_key is None:
         raise ValueError("LANGSMITH_API_KEY is required when tracing is enabled")
-    client = Client(api_key=settings.api_key.get_secret_value(), api_url=settings.endpoint,
-                    workspace_id=settings.workspace_id, timeout_ms=5000)
+    client = Client(
+        api_key=settings.api_key.get_secret_value(),
+        api_url=settings.endpoint,
+        workspace_id=settings.workspace_id,
+        timeout_ms=5000,
+    )
     try:
         with tracing_context(enabled=True, client=client, project_name=settings.project):
             yield
     finally:
+
         def close():
             try:
                 client.close(timeout=5)
-            except Exception:
-                logger.warning("LangSmith tracing cleanup failed. Check tracing configuration and connectivity.")
+            except Exception:  # noqa: BLE001 -- 同步/异步入口保持相同的隔离策略，只记录脱敏警告。
+                logger.warning(
+                    "LangSmith tracing cleanup failed. Check tracing configuration and connectivity."
+                )
+
         await complete_in_thread(close)

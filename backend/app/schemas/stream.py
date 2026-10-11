@@ -14,7 +14,7 @@ class _EventData(BaseModel):
 
 class MessageStartData(_EventData):
     # ClassVar 是类上的标签，不是 JSON 字段。事件名放在 SSE 的 event: 行。
-    event_name: ClassVar[str] = "message_start"
+    event_name: ClassVar[Literal["message_start"]] = "message_start"
 
     session_id: DatabaseID
     user_message_id: DatabaseID
@@ -22,7 +22,7 @@ class MessageStartData(_EventData):
 
 
 class MessageDeltaData(_EventData):
-    event_name: ClassVar[str] = "message_delta"
+    event_name: ClassVar[Literal["message_delta"]] = "message_delta"
 
     attempt_id: UUIDString
     # 空片段不用发送；但空格、换行可能是正文的一部分，不能 strip 后丢掉。
@@ -30,7 +30,7 @@ class MessageDeltaData(_EventData):
 
 
 class MessageDoneData(_EventData):
-    event_name: ClassVar[str] = "message_done"
+    event_name: ClassVar[Literal["message_done"]] = "message_done"
 
     attempt_id: UUIDString
     assistant_message: AssistantMessageResponse
@@ -40,7 +40,7 @@ class MessageDoneData(_EventData):
 class ReasoningDeltaData(_EventData):
     """模型 API 明确返回的推理文字；仅当次展示，不保存为聊天正文。"""
 
-    event_name: ClassVar[str] = "reasoning_delta"
+    event_name: ClassVar[Literal["reasoning_delta"]] = "reasoning_delta"
     attempt_id: UUIDString
     text: str = Field(min_length=1)
 
@@ -48,10 +48,20 @@ class ReasoningDeltaData(_EventData):
 class AgentProgressData(_EventData):
     """实际到达的执行阶段；不是模型编造的步骤，也不输出内部状态/个人记忆。"""
 
-    event_name: ClassVar[str] = "agent_progress"
+    event_name: ClassVar[Literal["agent_progress"]] = "agent_progress"
     attempt_id: UUIDString
-    stage: Literal["context_ready", "agent_running", "thinking", "answering", "saving",
-                   "memory_checking", "memory_saving", "memory_saved", "memory_skipped", "memory_unavailable"]
+    stage: Literal[
+        "context_ready",
+        "agent_running",
+        "thinking",
+        "answering",
+        "saving",
+        "memory_checking",
+        "memory_saving",
+        "memory_saved",
+        "memory_skipped",
+        "memory_unavailable",
+    ]
 
 
 class StreamError(GenerationError):
@@ -61,7 +71,7 @@ class StreamError(GenerationError):
 
 
 class MessageErrorData(_EventData):
-    event_name: ClassVar[str] = "message_error"
+    event_name: ClassVar[Literal["message_error"]] = "message_error"
 
     attempt_id: UUIDString
     error: StreamError

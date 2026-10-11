@@ -1,10 +1,10 @@
 """连接 Alembic、表模型和 MySQL；只有在线命令才读取数据库配置。"""
 
-from alembic import context
 from alembic.util import CommandError
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
+from alembic import context
 from app import models  # noqa: F401  导入五个模型，登记到共同的 metadata。
 from app.core.config import load_database_settings
 from app.db.base import Base
@@ -49,7 +49,7 @@ def run_migrations_online() -> None:
             # MySQL DDL 不能靠这里的事务整体回滚；失败后必须检查实际表结构。
             with context.begin_transaction():
                 context.run_migrations()
-    except (ValidationError, SQLAlchemyError, OSError):
+    except ValidationError, SQLAlchemyError, OSError:
         # 不把连接凭据或原始数据库异常输出到终端。
         raise CommandError(
             "Migration command failed. Check DB_* settings, MySQL availability, "

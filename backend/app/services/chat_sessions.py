@@ -13,7 +13,8 @@ from app.services.errors import SessionNotFoundError, SessionUnavailableError
 
 
 def create_chat_session(
-    current_user: UserResponse, session_factory: sessionmaker[Session],
+    current_user: UserResponse,
+    session_factory: sessionmaker[Session],
 ) -> SessionResponse:
     """调用方先用 get_current_user 验证身份；不能从请求正文构造 current_user。"""
     try:
@@ -40,7 +41,8 @@ def create_chat_session(
 
 
 def list_chat_sessions(
-    current_user: UserResponse, session_factory: sessionmaker[Session],
+    current_user: UserResponse,
+    session_factory: sessionmaker[Session],
 ) -> SessionListResponse:
     """调用方先验证身份；只读本人的全部会话，不查询消息、不分页。"""
     try:
@@ -51,8 +53,8 @@ def list_chat_sessions(
                 .order_by(ChatSession.last_activity_at.desc(), ChatSession.chat_session_id.desc())
             ).all()
             # 排序和用户筛选由数据库完成；Schema 仅整理公开字段。
-            response = SessionListResponse(
-                items=[SessionResponse.model_validate(chat) for chat in chats]
+            response = SessionListResponse.model_validate(
+                {"items": [SessionResponse.model_validate(chat) for chat in chats]}
             )
         # 读取结束释放 Session；不更新活动时间，也不创建空会话。
         return response
@@ -62,8 +64,10 @@ def list_chat_sessions(
 
 
 def rename_chat_session(
-    current_user: UserResponse, session_id: str,
-    request: RenameSessionRequest, session_factory: sessionmaker[Session],
+    current_user: UserResponse,
+    session_id: str,
+    request: RenameSessionRequest,
+    session_factory: sessionmaker[Session],
 ) -> SessionResponse:
     """调用方先验证身份和标题 Schema；不存在与不属于本人使用同一种错误。"""
     chat_id = int(format_database_id(session_id, "Session ID"))
@@ -72,8 +76,10 @@ def rename_chat_session(
             # 同时检查编号和主人，锁定这条记录直到提交，串行处理同一会话的改名。
             chat = session.scalar(
                 select(ChatSession)
-                .where(ChatSession.chat_session_id == chat_id,
-                       ChatSession.user_id == int(current_user.user_id))
+                .where(
+                    ChatSession.chat_session_id == chat_id,
+                    ChatSession.user_id == int(current_user.user_id),
+                )
                 .with_for_update()
             )
             if chat is None:

@@ -1,8 +1,9 @@
 """回答前的独立、非思考记忆阶段；不把工具轨迹混入历史回答或可见思考。"""
 
 import asyncio
-from dataclasses import replace
 import json
+from dataclasses import replace
+from typing import Any
 
 from deepagents import create_deep_agent
 from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
@@ -15,7 +16,10 @@ from app.agent.input_policy import estimate_message_tokens, estimate_text_tokens
 from app.agent.memory_backend import ProfileMemoryBackend
 from app.agent.output import managed_agent_stream
 from app.agent.profile_memory_tool import (
-    BoundMemoryTool, MEMORY_EXTRACTION_PROMPT, TOOL_NAME, contains_sensitive_memory,
+    MEMORY_EXTRACTION_PROMPT,
+    TOOL_NAME,
+    BoundMemoryTool,
+    contains_sensitive_memory,
 )
 from app.core.async_work import complete_in_thread
 from app.services.agent_input import _profile_memory
@@ -33,10 +37,22 @@ class MemoryToolOnlyMiddleware(AgentMiddleware):
     def request(self, request):
         request = request.override(tools=[self.tool], tool_choice=None)
         messages = ([request.system_message] if request.system_message else []) + request.messages
-        size = estimate_text_tokens(json.dumps({
-            "messages": [message.model_dump(mode="json", exclude_none=True) for message in messages],
-            "tools": [convert_to_openai_tool(self.tool)],
-        }, ensure_ascii=False)) + 32 * len(messages) + 256
+        size = (
+            estimate_text_tokens(
+                json.dumps(
+                    {
+                        "messages": [
+                            message.model_dump(mode="json", exclude_none=True)
+                            for message in messages
+                        ],
+                        "tools": [convert_to_openai_tool(self.tool)],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            + 32 * len(messages)
+            + 256
+        )
         if size + 2048 + self.policy.safety_tokens > self.policy.app_context_tokens:
             raise ContextTooLargeError()
         return request
@@ -46,7 +62,11 @@ class MemoryToolOnlyMiddleware(AgentMiddleware):
         calls = []
         for message in response.result:
             if isinstance(message, AIMessage):
-                if message.response_metadata.get("finish_reason") not in (None, "stop", "tool_calls"):
+                if message.response_metadata.get("finish_reason") not in (
+                    None,
+                    "stop",
+                    "tool_calls",
+                ):
                     raise AgentToolUseNotAllowedError()
                 if message.invalid_tool_calls:
                     raise AgentToolUseNotAllowedError()
@@ -76,35 +96,70 @@ class MemoryToolOnlyMiddleware(AgentMiddleware):
 def build_memory_agent(settings, prepared, bound):
     # 不带旧 assistant 消息/推理；关闭思考的工具阶段，无需伪造或持久化 reasoning_content。
     model = ChatDeepSeek(
-        model=settings.name, api_key=settings.api_key, api_base=settings.base_url,
-        max_tokens=2048, timeout=20, max_retries=0,
+        model=settings.name,
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+        max_tokens=2048,
+        timeout=20,
+        max_retries=0,
         extra_body={"thinking": {"type": "disabled"}},
     )
+    middleware: list[AgentMiddleware[Any, None]] = [
+        NoAutomaticSummary(),
+        ModelCallLimitMiddleware(run_limit=1, exit_behavior="error"),
+        MemoryToolOnlyMiddleware(bound.tool, prepared.policy),
+    ]
     return create_deep_agent(
-        model=model, system_prompt=MEMORY_EXTRACTION_PROMPT,
-        tools=[bound.tool], subagents=[], skills=None,
+        model=model,
+        system_prompt=MEMORY_EXTRACTION_PROMPT,
+        tools=[bound.tool],
+        subagents=[],
+        skills=None,
         backend=ProfileMemoryBackend(prepared.profile_memory),
-        middleware=[NoAutomaticSummary(), ModelCallLimitMiddleware(run_limit=1, exit_behavior="error"),
-                    MemoryToolOnlyMiddleware(bound.tool, prepared.policy)],
-        checkpointer=None, store=None, name="profile_memory_update",
+        middleware=middleware,
+        checkpointer=None,
+        store=None,
+        name="profile_memory_update",
     )
 
 
 def with_memory_result(prepared, profile, status, topics=()):
     """新记忆占据更多上下文时，只移除最早的完整问答；当前问题始终保留。"""
     if status == "saved":
-        note = "Backend confirmed saving these memory topics this turn: " + ", ".join(topics) + "."
+        note = (
+            "Backend confirmed saving or updating these memory topics this turn: "
+            + ", ".join(topics)
+            + ". Tell the user the update succeeded."
+        )
     elif status == "unconfirmed":
-        note = "Memory update could not be confirmed this turn. Do not claim success or guaranteed rollback."
+        note = (
+            "Memory update could not be confirmed this turn. The backend could not confirm a new "
+            "memory was saved, and do not claim that the whole system has no memory feature."
+        )
+    elif status == "rejected":
+        note = (
+            "The requested memory update was rejected by the backend privacy policy. Do not claim "
+            "that it was saved, and do not say that the whole system has no memory feature."
+        )
     else:
-        note = "No new memory save was confirmed this turn. Do not claim to have saved a new memory."
+        note = (
+            "No new memory save was confirmed this turn; no new memory was added or changed. "
+            "The existing profile may still contain "
+            "relevant memories, and this does not mean the profile is empty or that the whole system "
+            "has no memory feature. If the requested fact is already present, say it is already remembered. "
+            "Do not claim that a new memory was saved."
+        )
     policy = replace(prepared.policy, system_prompt=prepared.policy.system_prompt + "\n" + note)
     messages = list(prepared.messages)
 
     def size():
-        return (estimate_text_tokens(policy.system_prompt) + estimate_text_tokens(profile)
-                + estimate_text_tokens(policy.tool_definitions_json) + 256
-                + sum(estimate_message_tokens(message.content) for message in messages))
+        return (
+            estimate_text_tokens(policy.system_prompt)
+            + estimate_text_tokens(profile)
+            + estimate_text_tokens(policy.tool_definitions_json)
+            + 256
+            + sum(estimate_message_tokens(message.content) for message in messages)
+        )
 
     trimmed = False
     while size() > policy.input_limit and len(messages) > 1:
@@ -112,9 +167,15 @@ def with_memory_result(prepared, profile, status, topics=()):
         trimmed = True
     if size() > policy.input_limit:
         raise ContextTooLargeError()
-    return replace(prepared, policy=policy, profile_memory=profile, messages=tuple(messages),
-                   estimated_input_tokens=size(), history_rounds=(len(messages) - 1) // 2,
-                   history_truncated=prepared.history_truncated or trimmed)
+    return replace(
+        prepared,
+        policy=policy,
+        profile_memory=profile,
+        messages=tuple(messages),
+        estimated_input_tokens=size(),
+        history_rounds=(len(messages) - 1) // 2,
+        history_truncated=prepared.history_truncated or trimmed,
+    )
 
 
 async def prepare_memory_for_turn(accepted, factory, registry, settings, progress):
@@ -131,25 +192,41 @@ async def prepare_memory_for_turn(accepted, factory, registry, settings, progres
             async with asyncio.timeout(MEMORY_STAGE_TIMEOUT_SECONDS) as deadline:
                 agent = build_memory_agent(settings, prepared, bound)
                 stream = agent.astream(
-                    {"messages": [HumanMessage(content=json.dumps({
-                        "existing_profile": prepared.profile_memory, "current_user_message": bound.question,
-                    }, ensure_ascii=False))]},
-                    config={"run_name": "profile_memory_update", "recursion_limit": 20,
-                            "metadata": {"attempt_id": accepted.attempt_id}},
-                    stream_mode="messages", subgraphs=False,
+                    {
+                        "messages": [
+                            HumanMessage(
+                                content=json.dumps(
+                                    {
+                                        "existing_profile": prepared.profile_memory,
+                                        "current_user_message": bound.question,
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            )
+                        ]
+                    },
+                    config={
+                        "run_name": "profile_memory_update",
+                        "recursion_limit": 20,
+                        "metadata": {"attempt_id": accepted.attempt_id},
+                    },
+                    stream_mode="messages",
+                    subgraphs=False,
                 )
                 async with managed_agent_stream(stream):
                     async for _chunk, _metadata in stream:
                         # 记忆阶段的正文/参数不展示为答案或思考，但依旧遵守取消。
                         if deadline.expired():
                             raise TimeoutError
-                        if asyncio.current_task().cancelling():
+                        task = asyncio.current_task()
+                        if task is not None and task.cancelling():
                             raise asyncio.CancelledError
     except asyncio.CancelledError:
         raise
     except Exception as error:
         # 事件发送故障必须传播，否则会对已经断开的客户端继续调用模型。
         from app.services.chat_execution import EventDeliveryError
+
         if isinstance(error, EventDeliveryError):
             raise
         if bound.status != "saved":
@@ -158,13 +235,20 @@ async def prepare_memory_for_turn(accepted, factory, registry, settings, progres
         bound.close()
     if bound.status == "saved":
         try:
+
             def reload_profile():
                 with factory() as session:
                     return _profile_memory(session, int(prepared.user_id))
+
             profile = await complete_in_thread(reload_profile)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- 可选读回失败仍保留已确认的写入，不记录个人记忆或数据库异常。
             # 已确认保存，但读回失败。仍可回答，不伪造新的 Profile 正文。
             pass
-    await progress("memory_saved" if bound.status == "saved" else "memory_unavailable"
-                   if bound.status == "unconfirmed" else "memory_skipped")
+    await progress(
+        "memory_saved"
+        if bound.status == "saved"
+        else "memory_unavailable"
+        if bound.status == "unconfirmed"
+        else "memory_skipped"
+    )
     return with_memory_result(prepared, profile, bound.status, bound.saved_topics)

@@ -25,7 +25,7 @@ def hash_password(password: SecretStr) -> str:
     """取出原密码计算哈希；不 strip、不改大小写，不对星号掩码做哈希。"""
     try:
         return _hasher.hash(password.get_secret_value())
-    except (HashingError, UnicodeError):
+    except HashingError, UnicodeError:
         raise PasswordHashError("Password hashing failed.") from None
 
 
@@ -33,6 +33,6 @@ def verify_password(password: SecretStr, password_hash: str) -> bool:
     """用数据库中受信任的哈希核对原密码；不裁剪，不自己比较两次随机哈希。"""
     try:
         return _hasher.verify(password_hash, password.get_secret_value())
-    except (VerificationError, InvalidHashError, UnicodeError):
+    except VerificationError, InvalidHashError, UnicodeError:
         # 错密码、损坏哈希等一律不能通过认证，不向外暴露内部细节。
         return False

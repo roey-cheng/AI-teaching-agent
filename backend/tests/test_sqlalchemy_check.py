@@ -16,7 +16,7 @@ from app.db.engine import build_database_engine
 class SQLAlchemyCheckTest(unittest.TestCase):
     def setUp(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.settings = DatabaseSettings(
+            self.settings = DatabaseSettings.from_sources(
                 _env_file=None, name="fake_db", user="fake_user", password="fake@secret:/#%"
             )
 
@@ -33,11 +33,20 @@ class SQLAlchemyCheckTest(unittest.TestCase):
         self.assertEqual(url.database, "fake_db")
         self.assertEqual(url.query, {"charset": "utf8mb4"})
         self.assertNotIn("fake@secret:/#%", str(url))
-        self.assertEqual(create.call_args.kwargs, {
-            "echo": False, "hide_parameters": True, "pool_pre_ping": True,
-            "connect_args": {"connect_timeout": 5, "read_timeout": 5,
-                             "write_timeout": 5, "autocommit": False},
-        })
+        self.assertEqual(
+            create.call_args.kwargs,
+            {
+                "echo": False,
+                "hide_parameters": True,
+                "pool_pre_ping": True,
+                "connect_args": {
+                    "connect_timeout": 5,
+                    "read_timeout": 5,
+                    "write_timeout": 5,
+                    "autocommit": False,
+                },
+            },
+        )
 
     def test_building_a_real_engine_does_not_connect(self):
         with patch("pymysql.connect") as connect:
@@ -51,9 +60,11 @@ class SQLAlchemyCheckTest(unittest.TestCase):
 
     def run_check(self, engine):
         output = StringIO()
-        with patch.object(sqlalchemy_check, "load_database_settings", return_value=self.settings), \
-             patch.object(sqlalchemy_check, "build_database_engine", return_value=engine), \
-             redirect_stdout(output):
+        with (
+            patch.object(sqlalchemy_check, "load_database_settings", return_value=self.settings),
+            patch.object(sqlalchemy_check, "build_database_engine", return_value=engine),
+            redirect_stdout(output),
+        ):
             result = sqlalchemy_check.main()
         self.assertNotIn("fake@secret:/#%", output.getvalue())
         return result, output.getvalue()
@@ -97,16 +108,26 @@ class SQLAlchemyCheckTest(unittest.TestCase):
         engine.dispose.assert_called_once_with()
 
     def test_configuration_failure_does_not_build_engine_or_leak_error(self):
-        with patch.object(sqlalchemy_check, "load_database_settings", side_effect=OSError("fake-secret")), \
-             patch.object(sqlalchemy_check, "build_database_engine") as build, \
-             redirect_stdout(StringIO()) as output:
+        with (
+            patch.object(
+                sqlalchemy_check, "load_database_settings", side_effect=OSError("fake-secret")
+            ),
+            patch.object(sqlalchemy_check, "build_database_engine") as build,
+            redirect_stdout(StringIO()) as output,
+        ):
             self.assertEqual(sqlalchemy_check.main(), 1)
         build.assert_not_called()
         self.assertNotIn("fake-secret", output.getvalue())
 
     def test_engine_creation_failure_is_reported_safely(self):
-        with patch.object(sqlalchemy_check, "load_database_settings", return_value=self.settings), \
-             patch.object(sqlalchemy_check, "build_database_engine", side_effect=SQLAlchemyError("fake-secret")), \
-             redirect_stdout(StringIO()) as output:
+        with (
+            patch.object(sqlalchemy_check, "load_database_settings", return_value=self.settings),
+            patch.object(
+                sqlalchemy_check,
+                "build_database_engine",
+                side_effect=SQLAlchemyError("fake-secret"),
+            ),
+            redirect_stdout(StringIO()) as output,
+        ):
             self.assertEqual(sqlalchemy_check.main(), 1)
         self.assertNotIn("fake-secret", output.getvalue())

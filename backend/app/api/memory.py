@@ -9,7 +9,9 @@ from app.schemas import ErrorResponse, MemoryListResponse
 from app.services.profile_memory import list_profile_memory
 
 router = APIRouter(
-    prefix="/api/v1/me", tags=["Profile memory"], route_class=ResourceRoute,
+    prefix="/api/v1/me",
+    tags=["Profile memory"],
+    route_class=ResourceRoute,
     responses={status: {"model": ErrorResponse} for status in (401, 413, 422, 500, 503)},
 )
 

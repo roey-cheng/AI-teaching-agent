@@ -14,7 +14,8 @@ from app.services.errors import AuthenticationRequiredError, AuthenticationUnava
 
 
 def get_current_user(
-    token: SecretStr | None, session_factory: sessionmaker[Session],
+    token: SecretStr | None,
+    session_factory: sessionmaker[Session],
 ) -> UserResponse:
     """身份只由凭据关联的数据库记录决定，不接收前端指定的 user_id。"""
     # 没带凭据或格式不对，直接拒绝，不占用数据库连接。
@@ -26,15 +27,25 @@ def get_current_user(
         with session_factory() as session:
             # JOIN 把登录记录与所属用户一起查出；不读取密码哈希或完整 ORM 对象。
             record = session.execute(
-                select(User.user_id, User.email, User.display_name, User.status,
-                       AuthSession.expires_at, AuthSession.revoked_at)
+                select(
+                    User.user_id,
+                    User.email,
+                    User.display_name,
+                    User.status,
+                    AuthSession.expires_at,
+                    AuthSession.revoked_at,
+                )
                 .join(AuthSession, AuthSession.user_id == User.user_id)
                 .where(AuthSession.token_hash == token_hash)
             ).one_or_none()
             # 查询完成后取当前 UTC 时间；到期时刻本身也算失效，不自动续期。
             now = datetime.now(UTC).replace(tzinfo=None)
-            if (record is None or record.revoked_at is not None
-                    or record.expires_at <= now or record.status != "ACTIVE"):
+            if (
+                record is None
+                or record.revoked_at is not None
+                or record.expires_at <= now
+                or record.status != "ACTIVE"
+            ):
                 raise AuthenticationRequiredError()
             result = UserResponse.model_validate(record)
         return result

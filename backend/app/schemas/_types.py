@@ -26,5 +26,7 @@ def _normalize_uuid(value: object) -> str:
 
 # Annotated 的意思是“原有类型 + 校验规则”，不需要每个编号都重复写 validator。
 DatabaseID = Annotated[str, BeforeValidator(_format_id)]
-UUIDString = Annotated[str, BeforeValidator(_normalize_uuid), Field(json_schema_extra={"format": "uuid"})]
+UUIDString = Annotated[
+    str, BeforeValidator(_normalize_uuid), Field(json_schema_extra={"format": "uuid"})
+]
 UTCDateTime = Annotated[datetime, AfterValidator(database_datetime_as_utc)]

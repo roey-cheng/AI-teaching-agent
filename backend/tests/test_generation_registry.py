@@ -1,8 +1,8 @@
 """单进程短锁/运行登记测试；没有真实模型或数据库任务。"""
 
+import unittest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
-import unittest
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -37,10 +37,12 @@ class GenerationRegistryTest(unittest.TestCase):
     def test_concurrent_claims_only_one_wins(self):
         registry = GenerationRegistry()
         barrier = Barrier(2)
+
         def claim():
             barrier.wait(timeout=5)
             with registry.locked(1) as slot:
                 return slot.claim(str(uuid4()))
+
         with ThreadPoolExecutor(max_workers=2) as pool:
             jobs = [pool.submit(claim) for _ in range(2)]
             self.assertEqual(sorted(job.result(timeout=5) for job in jobs), [False, True])
@@ -48,11 +50,13 @@ class GenerationRegistryTest(unittest.TestCase):
     def test_same_session_waits_but_other_session_is_independent(self):
         registry = GenerationRegistry()
         waiting, acquired = Event(), Event()
+
         def reader():
             waiting.set()
             with registry.locked(1) as slot:
                 acquired.set()
                 return slot.attempt_id
+
         with ThreadPoolExecutor(max_workers=1) as pool:
             with registry.locked(1) as slot:
                 future = pool.submit(reader)

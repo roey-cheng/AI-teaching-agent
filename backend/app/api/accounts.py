@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 
-from app.api.security import AccountRoute, COOKIE_NAME, cookie_token
+from app.api.security import COOKIE_NAME, AccountRoute, cookie_token
 from app.core.async_work import complete_in_thread
 from app.schemas import LoginRequest, LoginResponse, RegisterRequest, RegisterResponse, UserResponse
 from app.schemas.error import ErrorResponse
@@ -14,9 +14,13 @@ from app.services.login import login_user
 from app.services.logout import logout_user
 
 router = APIRouter(
-    prefix="/api/v1", tags=["Accounts"], route_class=AccountRoute,
+    prefix="/api/v1",
+    tags=["Accounts"],
+    route_class=AccountRoute,
     # 覆盖 FastAPI 默认的 422 文档，实际返回的是项目统一错误外壳。
-    responses={status: {"model": ErrorResponse} for status in (401, 403, 409, 413, 415, 422, 429, 500, 503)},
+    responses={
+        status: {"model": ErrorResponse} for status in (401, 403, 409, 413, 415, 422, 429, 500, 503)
+    },
 )
 
 
@@ -35,9 +39,13 @@ async def login(body: LoginRequest, request: Request, response: Response):
     result = await complete_in_thread(lambda: login_user(body, factory, current_token=token))
     # 业务已确认提交才设置 Cookie；原凭据只在响应头中，不进 JSON。
     response.set_cookie(
-        key=COOKIE_NAME, value=result.token.get_secret_value(),
+        key=COOKIE_NAME,
+        value=result.token.get_secret_value(),
         max_age=max(0, int((result.expires_at - datetime.now(UTC)).total_seconds())),
-        expires=result.expires_at, path="/", httponly=True, samesite="lax",
+        expires=result.expires_at,
+        path="/",
+        httponly=True,
+        samesite="lax",
         secure=request.app.state.http_settings.cookie_secure,
     )
     return result.response
@@ -49,8 +57,13 @@ async def logout(request: Request):
     token = cookie_token(request)
     await complete_in_thread(lambda: logout_user(token, factory))
     response = Response(status_code=204)
-    response.delete_cookie(COOKIE_NAME, path="/", httponly=True, samesite="lax",
-                           secure=request.app.state.http_settings.cookie_secure)
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=request.app.state.http_settings.cookie_secure,
+    )
     return response
 
 

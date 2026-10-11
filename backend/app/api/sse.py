@@ -1,31 +1,44 @@
 """SSE 传输层：只搬运白名单事件，不生成答案、不决定数据库成功状态。"""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-import logging
 
 from starlette.responses import JSONResponse, Response
 
 from app.core.async_work import complete_before_cancelling
 from app.schemas import (
-    AgentProgressData, DuplicateMessageResponse, MessageDeltaData, MessageDoneData,
-    MessageErrorData, MessageStartData, ReasoningDeltaData,
+    AgentProgressData,
+    DuplicateMessageResponse,
+    MessageDeltaData,
+    MessageDoneData,
+    MessageErrorData,
+    MessageStartData,
+    ReasoningDeltaData,
 )
 from app.services.chat_execution import ChatEvent
 
 logger = logging.getLogger(__name__)
-EVENT_TYPES = (MessageStartData, AgentProgressData, ReasoningDeltaData,
-               MessageDeltaData, MessageDoneData, MessageErrorData)
+EVENT_TYPES = (
+    MessageStartData,
+    AgentProgressData,
+    ReasoningDeltaData,
+    MessageDeltaData,
+    MessageDoneData,
+    MessageErrorData,
+)
 
 
 def encode_event(event: ChatEvent, request_id: str) -> bytes:
     if type(event) not in EVENT_TYPES:
         raise ValueError("Unsupported public stream event")
     if isinstance(event, MessageErrorData):
-        event = event.model_copy(update={"error": event.error.model_copy(update={"request_id": request_id})})
+        event = event.model_copy(
+            update={"error": event.error.model_copy(update={"request_id": request_id})}
+        )
     # JSON 编码会转义正文中的换行，用户文字不能伪造另一个 event: 行。
-    return f"event: {event.event_name}\ndata: {event.model_dump_json()}\n\n".encode("utf-8")
+    return f"event: {event.event_name}\ndata: {event.model_dump_json()}\n\n".encode()
 
 
 @dataclass
@@ -43,8 +56,16 @@ class ChatStreamResponse(Response):
 
     media_type = "text/event-stream"
 
-    def __init__(self, execute: Callable, *, request_id: str, heartbeat_seconds=15.0,
-                 send_timeout_seconds=15.0, queue_size=8, active_requests=None):
+    def __init__(
+        self,
+        execute: Callable,
+        *,
+        request_id: str,
+        heartbeat_seconds=15.0,
+        send_timeout_seconds=15.0,
+        queue_size=8,
+        active_requests=None,
+    ):
         super().__init__(status_code=200)
         self.execute = execute
         self.request_id = request_id
@@ -78,9 +99,11 @@ class ChatStreamResponse(Response):
             except asyncio.CancelledError:
                 if not closing:
                     # 供应商自行取消不能让消费者永久等待；传输主动取消时不再入队。
-                    await queue.put(_Finished(error=RuntimeError("Execution was unexpectedly cancelled")))
+                    await queue.put(
+                        _Finished(error=RuntimeError("Execution was unexpectedly cancelled"))
+                    )
                 raise
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 -- 后台任务必须给消费者发送失败终态，防止 SSE 永久等待。
                 await queue.put(_Finished(error=error))
             else:
                 await queue.put(_Finished(result=result))
@@ -98,7 +121,9 @@ class ChatStreamResponse(Response):
                     item = await asyncio.wait_for(queue.get(), timeout=self.heartbeat_seconds)
                 except TimeoutError:
                     if started:
-                        await write({"type": "http.response.body", "body": b": ping\n\n", "more_body": True})
+                        await write(
+                            {"type": "http.response.body", "body": b": ping\n\n", "more_body": True}
+                        )
                     continue
                 if isinstance(item, _Finished):
                     if not started:
@@ -111,7 +136,10 @@ class ChatStreamResponse(Response):
                     else:
                         if item.error is not None or not terminal:
                             # 结算无法确认时，不编造 message_error/FAILED。前端须重查历史。
-                            logger.error("SSE ended without confirmed terminal; request_id=%s", self.request_id)
+                            logger.error(
+                                "SSE ended without confirmed terminal; request_id=%s",
+                                self.request_id,
+                            )
                         await write({"type": "http.response.body", "body": b"", "more_body": False})
                     return
                 event, frame = item
@@ -119,11 +147,17 @@ class ChatStreamResponse(Response):
                     if not isinstance(event, MessageStartData):
                         raise RuntimeError("Execution did not start with message_start")
                     attempt_id = event.attempt_id
-                    await write({"type": "http.response.start", "status": 200, "headers": [
-                        (b"content-type", b"text/event-stream; charset=utf-8"),
-                        (b"cache-control", b"no-cache, no-store"),
-                        (b"x-accel-buffering", b"no"),
-                    ]})
+                    await write(
+                        {
+                            "type": "http.response.start",
+                            "status": 200,
+                            "headers": [
+                                (b"content-type", b"text/event-stream; charset=utf-8"),
+                                (b"cache-control", b"no-cache, no-store"),
+                                (b"x-accel-buffering", b"no"),
+                            ],
+                        }
+                    )
                     started = True
                 elif isinstance(event, MessageStartData):
                     raise RuntimeError("Duplicate stream start")
@@ -147,7 +181,7 @@ class ChatStreamResponse(Response):
                 consumer.result()
             else:
                 watcher.result()
-        except (OSError, TimeoutError):
+        except OSError, TimeoutError:
             # 已断线/无法继续发送；不能对坏连接再报一次 HTTP 错误。
             pass
         finally:

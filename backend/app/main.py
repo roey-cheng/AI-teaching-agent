@@ -1,17 +1,17 @@
 """FastAPI 入口；启动核对后接受全部业务请求，关闭时等待流式生成清理。"""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
-import logging
 
 from fastapi import FastAPI
 
 from app.api.accounts import router as accounts_router
-from app.api.chat_sessions import router as sessions_router
 from app.api.chat_messages import router as messages_router
-from app.api.memory import router as memory_router
+from app.api.chat_sessions import router as sessions_router
 from app.api.errors import RequestContextMiddleware, install_error_handlers
+from app.api.memory import router as memory_router
 from app.api.security import AccountRateLimiter
 from app.core.async_work import complete_before_cancelling, complete_in_thread
 from app.core.config import load_database_settings
@@ -28,7 +28,7 @@ def configured_runtime():
     # import app 不读取 .env、不连接数据库；只有真正启动应用时才做这些事。
     try:
         engine = build_database_engine(load_database_settings())
-    except Exception:
+    except Exception:  # noqa: BLE001 -- 启动配置和建引擎失败统一脱敏，避免驱动异常暴露凭据。
         raise StartupCleanupError() from None
     try:
         with open_backend_runtime(engine) as runtime:
@@ -38,13 +38,17 @@ def configured_runtime():
 
 
 def create_app(
-    *, runtime_factory: Callable[[], AbstractContextManager[BackendRuntime]] | None = None,
+    *,
+    runtime_factory: Callable[[], AbstractContextManager[BackendRuntime]] | None = None,
     http_settings: HTTPSettings | None = None,
 ) -> FastAPI:
     """测试可注入独立运行环境，避免访问开发者 .env 和项目数据库。"""
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        application.state.http_settings = http_settings if http_settings is not None else HTTPSettings()
+        application.state.http_settings = (
+            http_settings if http_settings is not None else HTTPSettings.from_sources()
+        )
         application.state.account_limiter = AccountRateLimiter()
         application.state.active_stream_requests = set()
         application.state.stopping = False
@@ -61,8 +65,11 @@ def create_app(
             # 取消也必须等数据库线程返回，再退出作用域释放进程锁。
             runtime = await complete_in_thread(enter)
             application.state.runtime = runtime
-            logger.info("Startup reconciliation complete: %s interrupted, %s restored successful.",
-                        runtime.cleanup.interrupted, runtime.cleanup.restored_success)
+            logger.info(
+                "Startup reconciliation complete: %s interrupted, %s restored successful.",
+                runtime.cleanup.interrupted,
+                runtime.cleanup.restored_success,
+            )
             yield  # 执行到这里后，服务器才开始正常接受 HTTP 请求。
         finally:
             # 即使服务器先触发 shutdown，也须等待 SSE 执行器完成取消/提交核对，
@@ -73,7 +80,9 @@ def create_app(
                 for task in streams:
                     task.cancel()
                 if streams:
-                    await complete_before_cancelling(asyncio.gather(*streams, return_exceptions=True))
+                    await complete_before_cancelling(
+                        asyncio.gather(*streams, return_exceptions=True)
+                    )
             finally:
                 if hasattr(application.state, "runtime"):
                     del application.state.runtime

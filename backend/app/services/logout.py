@@ -26,8 +26,11 @@ def logout_user(token: SecretStr | None, session_factory: sessionmaker[Session])
             # 不按 user_id 撤销全部设备，也不检查账号状态，禁用账号仍可退出。
             session.execute(
                 update(AuthSession)
-                .where(AuthSession.token_hash == token_hash,
-                       AuthSession.revoked_at.is_(None), AuthSession.expires_at > now)
+                .where(
+                    AuthSession.token_hash == token_hash,
+                    AuthSession.revoked_at.is_(None),
+                    AuthSession.expires_at > now,
+                )
                 .values(revoked_at=now)
             )
         # 即使影响 0 行（不存在、过期、已撤销），也视为成功。

@@ -1,7 +1,7 @@
 """退出业务离线测试；不连接数据库，不操作 Cookie。"""
 
-from datetime import UTC, datetime
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
@@ -19,8 +19,14 @@ class LogoutServiceTest(unittest.TestCase):
         self.writer = self.factory.begin.return_value.__enter__.return_value
 
     def test_missing_or_malformed_token_succeeds_without_database(self):
-        for token in (None, SecretStr(""), SecretStr("a" * 42), SecretStr("a" * 44),
-                      SecretStr("中" * 43), SecretStr(" " * 43)):
+        for token in (
+            None,
+            SecretStr(""),
+            SecretStr("a" * 42),
+            SecretStr("a" * 44),
+            SecretStr("中" * 43),
+            SecretStr(" " * 43),
+        ):
             self.assertIsNone(logout_user(token, self.factory))
         self.factory.begin.assert_not_called()
         self.factory.assert_not_called()
@@ -31,10 +37,14 @@ class LogoutServiceTest(unittest.TestCase):
             clock.now.return_value = now
             self.assertIsNone(logout_user(self.token, self.factory))
         statement = self.writer.execute.call_args.args[0]
-        self.assertEqual(statement.compile().params, {
-            "token_hash_1": hash_session_token(self.token),
-            "expires_at_1": now.replace(tzinfo=None), "revoked_at": now.replace(tzinfo=None),
-        })
+        self.assertEqual(
+            statement.compile().params,
+            {
+                "token_hash_1": hash_session_token(self.token),
+                "expires_at_1": now.replace(tzinfo=None),
+                "revoked_at": now.replace(tzinfo=None),
+            },
+        )
         sql = str(statement)
         self.assertIn("UPDATE auth_sessions SET revoked_at=", sql)
         self.assertIn("auth_sessions.revoked_at IS NULL", sql)

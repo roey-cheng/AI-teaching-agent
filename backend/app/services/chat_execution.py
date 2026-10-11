@@ -17,17 +17,31 @@ from app.agent.tracing import async_agent_tracing
 from app.core.async_work import complete_in_thread
 from app.core.config import ModelSettings, TracingSettings
 from app.schemas import (
-    AgentProgressData, DuplicateMessageResponse, MessageDeltaData, MessageDoneData,
-    MessageErrorData, MessageStartData, ReasoningDeltaData, RetryMessageRequest,
-    SendMessageRequest, StreamError, UserResponse,
+    AgentProgressData,
+    DuplicateMessageResponse,
+    MessageDeltaData,
+    MessageDoneData,
+    MessageErrorData,
+    MessageStartData,
+    ReasoningDeltaData,
+    RetryMessageRequest,
+    SendMessageRequest,
+    StreamError,
+    UserResponse,
 )
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import settle_generation
 from app.services.message_retry import accept_failed_message_retry
 from app.services.message_submission import AcceptedMessage, accept_user_message
 
-ChatEvent = (MessageStartData | AgentProgressData | ReasoningDeltaData | MessageDeltaData
-             | MessageDoneData | MessageErrorData)
+ChatEvent = (
+    MessageStartData
+    | AgentProgressData
+    | ReasoningDeltaData
+    | MessageDeltaData
+    | MessageDoneData
+    | MessageErrorData
+)
 
 
 class EventDeliveryError(Exception):
@@ -38,11 +52,18 @@ class EventDeliveryError(Exception):
 
 
 async def execute_chat_turn(
-    current_user: UserResponse, session_id: str, request: SendMessageRequest,
-    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
-    model_settings: ModelSettings, tracing_settings: TracingSettings,
-    input_policy: AgentInputPolicy, check_new_message: Callable[[SendMessageRequest], None],
-    on_event: Callable[[ChatEvent], Awaitable[None]], timeout_seconds: float = 120,
+    current_user: UserResponse,
+    session_id: str,
+    request: SendMessageRequest,
+    session_factory: sessionmaker[Session],
+    registry: GenerationRegistry,
+    *,
+    model_settings: ModelSettings,
+    tracing_settings: TracingSettings,
+    input_policy: AgentInputPolicy,
+    check_new_message: Callable[[SendMessageRequest], None],
+    on_event: Callable[[ChatEvent], Awaitable[None]],
+    timeout_seconds: float = 120,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """调用方先认证，传应用共享 registry 和真实限流检查。严禁作为匿名公开模型代理。
 
@@ -50,20 +71,41 @@ async def execute_chat_turn(
     不采用调用方可能遗弃的裸 async generator，不脱离请求偷偷继续生成。
     准入/结算错误向外抛安全业务异常；已接收的模型失败返回 message_error。
     """
-    scope = accept_user_message(current_user, session_id, request, session_factory, registry,
-                                check_new_message=check_new_message, input_policy=input_policy)
+    scope = accept_user_message(
+        current_user,
+        session_id,
+        request,
+        session_factory,
+        registry,
+        check_new_message=check_new_message,
+        input_policy=input_policy,
+    )
     return await _execute_with_scope(
-        scope, session_factory, registry, model_settings=model_settings, tracing_settings=tracing_settings,
-        input_policy=input_policy, on_event=on_event, timeout_seconds=timeout_seconds,
+        scope,
+        session_factory,
+        registry,
+        model_settings=model_settings,
+        tracing_settings=tracing_settings,
+        input_policy=input_policy,
+        on_event=on_event,
+        timeout_seconds=timeout_seconds,
     )
 
 
 async def execute_chat_retry(
-    current_user: UserResponse, session_id: str, message_id: str, request: RetryMessageRequest,
-    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
-    model_settings: ModelSettings, tracing_settings: TracingSettings,
-    input_policy: AgentInputPolicy, check_retry: Callable[[RetryMessageRequest], None],
-    on_event: Callable[[ChatEvent], Awaitable[None]], timeout_seconds: float = 120,
+    current_user: UserResponse,
+    session_id: str,
+    message_id: str,
+    request: RetryMessageRequest,
+    session_factory: sessionmaker[Session],
+    registry: GenerationRegistry,
+    *,
+    model_settings: ModelSettings,
+    tracing_settings: TracingSettings,
+    input_policy: AgentInputPolicy,
+    check_retry: Callable[[RetryMessageRequest], None],
+    on_event: Callable[[ChatEvent], Awaitable[None]],
+    timeout_seconds: float = 120,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """重试原问题；不是发送同样文字的新消息，也不是重新生成成功答案。
 
@@ -71,20 +113,36 @@ async def execute_chat_retry(
     调用方取消时等待模型/提交清理，不在后台脱离作用域继续执行。
     """
     scope = accept_failed_message_retry(
-        current_user, session_id, message_id, request, session_factory, registry,
-        check_retry=check_retry, input_policy=input_policy,
+        current_user,
+        session_id,
+        message_id,
+        request,
+        session_factory,
+        registry,
+        check_retry=check_retry,
+        input_policy=input_policy,
     )
     return await _execute_with_scope(
-        scope, session_factory, registry, model_settings=model_settings, tracing_settings=tracing_settings,
-        input_policy=input_policy, on_event=on_event, timeout_seconds=timeout_seconds,
+        scope,
+        session_factory,
+        registry,
+        model_settings=model_settings,
+        tracing_settings=tracing_settings,
+        input_policy=input_policy,
+        on_event=on_event,
+        timeout_seconds=timeout_seconds,
     )
 
 
 async def _execute_with_scope(
     scope: AbstractContextManager[AcceptedMessage | DuplicateMessageResponse],
-    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
-    model_settings: ModelSettings, tracing_settings: TracingSettings,
-    input_policy: AgentInputPolicy, on_event: Callable[[ChatEvent], Awaitable[None]],
+    session_factory: sessionmaker[Session],
+    registry: GenerationRegistry,
+    *,
+    model_settings: ModelSettings,
+    tracing_settings: TracingSettings,
+    input_policy: AgentInputPolicy,
+    on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """两种准入之后走同一条记忆→回答→保存→清理路径，避免维护两套生成逻辑。"""
@@ -96,7 +154,7 @@ async def _execute_with_scope(
     async def emit(event: ChatEvent):
         try:
             await on_event(event)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- 执行边界必须将任意模型/回调故障结算为失败，保留取消传播。
             raise EventDeliveryError() from None
 
     # __enter__ 在线程中执行。即使取消发生在提交期间，也保留清理所需的进入结果。
@@ -114,12 +172,23 @@ async def _execute_with_scope(
             return accepted  # 不创建模型，不发送另一套流，不再消耗生成额度。
 
         async def progress(stage):
-            await emit(AgentProgressData(attempt_id=accepted.attempt_id, stage=stage))
+            await emit(
+                AgentProgressData.model_validate(
+                    {"attempt_id": accepted.attempt_id, "stage": stage}
+                )
+            )
 
         try:
             async with asyncio.timeout(timeout_seconds) as deadline:
-                await emit(MessageStartData(session_id=accepted.session_id,
-                                            user_message_id=accepted.user_message_id, attempt_id=accepted.attempt_id))
+                await emit(
+                    MessageStartData.model_validate(
+                        {
+                            "session_id": accepted.session_id,
+                            "user_message_id": accepted.user_message_id,
+                            "attempt_id": accepted.attempt_id,
+                        }
+                    )
+                )
                 await progress("context_ready")  # 准入已完成历史与用户记忆快照的读取。
                 answer_parts = []
                 finish_reason = None
@@ -127,24 +196,37 @@ async def _execute_with_scope(
                 output_bytes = 0
                 async with async_agent_tracing(tracing_settings):
                     prepared = await prepare_memory_for_turn(
-                        accepted, session_factory, registry, model_settings, progress,
+                        accepted,
+                        session_factory,
+                        registry,
+                        model_settings,
+                        progress,
                     )
                     agent = build_chat_agent(model_settings, prepared)
                     await progress("agent_running")
                     stream = agent.astream(
                         {"messages": prepared.as_agent_messages()},
-                        config={"run_name": "teaching_chat", "metadata": {"attempt_id": accepted.attempt_id}},
-                        stream_mode="messages", subgraphs=False,
+                        config={
+                            "run_name": "teaching_chat",
+                            "metadata": {"attempt_id": accepted.attempt_id},
+                        },
+                        stream_mode="messages",
+                        subgraphs=False,
                     )
                     async with managed_agent_stream(stream):
                         async for chunk, metadata in stream:
                             # 即便下游吞掉取消，也禁止继续输出/保存本次结果。
                             if deadline.expired():
                                 raise TimeoutError
-                            if asyncio.current_task().cancelling():
+                            task = asyncio.current_task()
+                            if task is not None and task.cancelling():
                                 raise asyncio.CancelledError
+                            if not isinstance(metadata, dict):
+                                raise TypeError("Invalid model stream metadata")
                             visible = extract_visible_chunk(chunk, metadata)
-                            output_bytes += len(visible.reasoning.encode("utf-8")) + len(visible.answer.encode("utf-8"))
+                            output_bytes += len(visible.reasoning.encode("utf-8")) + len(
+                                visible.answer.encode("utf-8")
+                            )
                             # 额外内存保护，不冒充精确 token 计数；模型侧额度包含思考和正文。
                             if output_bytes > input_policy.output_tokens * 32:
                                 raise ValueError("Model output exceeded the execution size limit")
@@ -152,13 +234,24 @@ async def _execute_with_scope(
                                 if not seen_reasoning:
                                     await progress("thinking")
                                     seen_reasoning = True
-                                await emit(ReasoningDeltaData(attempt_id=accepted.attempt_id, text=visible.reasoning))
+                                await emit(
+                                    ReasoningDeltaData.model_validate(
+                                        {
+                                            "attempt_id": accepted.attempt_id,
+                                            "text": visible.reasoning,
+                                        }
+                                    )
+                                )
                             if visible.answer:
                                 if not seen_answer:
                                     await progress("answering")
                                     seen_answer = True
                                 answer_parts.append(visible.answer)
-                                await emit(MessageDeltaData(attempt_id=accepted.attempt_id, text=visible.answer))
+                                await emit(
+                                    MessageDeltaData.model_validate(
+                                        {"attempt_id": accepted.attempt_id, "text": visible.answer}
+                                    )
+                                )
                             if visible.finish_reason is not None:
                                 finish_reason = visible.finish_reason
                 # stop 片段还不算成功：必须等图完整结束，中间件可能在最后拒绝工具调用。
@@ -167,21 +260,36 @@ async def _execute_with_scope(
                     raise ValueError("The model did not produce a complete answer")
                 if deadline.expired():
                     raise TimeoutError
-                if asyncio.current_task().cancelling():
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
                     raise asyncio.CancelledError
                 await progress("saving")
-                outcome = await complete_in_thread(lambda: settle_generation(
-                    accepted, session_factory, registry, answer=answer,
-                ))
-        except (asyncio.CancelledError, EventDeliveryError):
+                outcome = await complete_in_thread(
+                    lambda: settle_generation(
+                        accepted,
+                        session_factory,
+                        registry,
+                        answer=answer,
+                    )
+                )
+        except asyncio.CancelledError, EventDeliveryError:
             # finally 退出准入作用域：核对已提交成功的回复，否则标中断，不再发送事件。
             raise
-        except Exception as error:
-            code = "GENERATION_TIMEOUT" if isinstance(error, (TimeoutError, APITimeoutError)) else "MODEL_REQUEST_FAILED"
+        except Exception as error:  # noqa: BLE001 -- 执行边界必须将任意模型/回调故障结算为失败，保留取消传播。
+            code = (
+                "GENERATION_TIMEOUT"
+                if isinstance(error, (TimeoutError, APITimeoutError))
+                else "MODEL_REQUEST_FAILED"
+            )
             # 新事务核对提交结果：如果成功提交但连接返回失败，保留成功，不写相反状态。
-            outcome = await complete_in_thread(lambda: settle_generation(
-                accepted, session_factory, registry, error_code=code,
-            ))
+            outcome = await complete_in_thread(
+                lambda: settle_generation(
+                    accepted,
+                    session_factory,
+                    registry,
+                    error_code=code,
+                )
+            )
     finally:
         if entered:
             # 先关闭模型流/跟踪并等在途线程，再核对数据库最终状态并匹配释放占用。
@@ -189,10 +297,23 @@ async def _execute_with_scope(
 
     # 清理完成后才给调用方 terminal；若此时连接断开，数据库结果仍可由历史接口确认。
     if outcome.assistant is not None:
-        terminal = MessageDoneData(attempt_id=accepted.attempt_id, assistant_message=outcome.assistant)
+        terminal = MessageDoneData.model_validate(
+            {"attempt_id": accepted.attempt_id, "assistant_message": outcome.assistant}
+        )
     else:
-        terminal = MessageErrorData(attempt_id=accepted.attempt_id, error=StreamError(
-            code=outcome.error.code, message=outcome.error.message, request_id=f"req_{uuid4().hex}",
-        ))
+        if outcome.error is None:
+            raise RuntimeError("Generation outcome has neither an answer nor an error")
+        terminal = MessageErrorData.model_validate(
+            {
+                "attempt_id": accepted.attempt_id,
+                "error": StreamError.model_validate(
+                    {
+                        "code": outcome.error.code,
+                        "message": outcome.error.message,
+                        "request_id": f"req_{uuid4().hex}",
+                    }
+                ),
+            }
+        )
     await emit(terminal)
     return terminal

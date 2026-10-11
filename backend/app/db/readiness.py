@@ -7,8 +7,8 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, inspect
 
-from app.db.base import Base
 from app import models  # noqa: F401 -- 导入五张表，将它们登记到 Base.metadata。
+from app.db.base import Base
 
 
 class DatabaseNotReadyError(Exception):
@@ -21,8 +21,11 @@ def check_database_ready(engine: Engine) -> None:
     heads = set(ScriptDirectory.from_config(Config(str(backend / "alembic.ini"))).get_heads())
     with engine.connect() as connection:
         dialect = connection.dialect
-        if (dialect.name != "mysql" or getattr(dialect, "is_mariadb", False)
-                or (dialect.server_version_info or ()) < (8, 4)):
+        if (
+            dialect.name != "mysql"
+            or getattr(dialect, "is_mariadb", False)
+            or (dialect.server_version_info or ()) < (8, 4)
+        ):
             raise DatabaseNotReadyError()
         actual = set(MigrationContext.configure(connection).get_current_heads())
         tables = set(inspect(connection).get_table_names())

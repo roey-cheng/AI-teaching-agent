@@ -30,8 +30,10 @@ class AuthSession(Base):
     user_id: Mapped[int] = mapped_column(
         BIGINT(unsigned=True),
         ForeignKey(
-            "users.user_id", name="fk_auth_sessions_user",
-            ondelete="RESTRICT", onupdate="RESTRICT",
+            "users.user_id",
+            name="fk_auth_sessions_user",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         nullable=False,
     )

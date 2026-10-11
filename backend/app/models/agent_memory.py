@@ -9,33 +9,35 @@ from app.db.base import Base
 
 # 25 个主题的共同允许列表。后续 Schema/工具/服务复用它，不分别维护不同版本。
 # MappingProxyType 把字典变成只读映射，避免运行时误改；内容全部是项目常量。
-MEMORY_TOPIC_TYPES = MappingProxyType({
-    "preference.language": "LEARNING_PREFERENCE",
-    "preference.explanation_style": "LEARNING_PREFERENCE",
-    "preference.detail_level": "LEARNING_PREFERENCE",
-    "preference.example_style": "LEARNING_PREFERENCE",
-    "preference.code_style": "LEARNING_PREFERENCE",
-    "preference.hint_style": "LEARNING_PREFERENCE",
-    "preference.pacing": "LEARNING_PREFERENCE",
-    "preference.knowledge_connections": "LEARNING_PREFERENCE",
-    "learning.goal": "LEARNING_GOAL",
-    "learning.current_topic": "LEARNING_GOAL",
-    "programming.level": "PROGRAMMING_BACKGROUND",
-    "programming.languages": "PROGRAMMING_BACKGROUND",
-    "programming.known_concepts": "PROGRAMMING_BACKGROUND",
-    "programming.tools": "PROGRAMMING_BACKGROUND",
-    "programming.environment": "PROGRAMMING_BACKGROUND",
-    "personal.preferred_name": "PERSONAL_BACKGROUND",
-    "personal.occupation": "PERSONAL_BACKGROUND",
-    "personal.interests": "PERSONAL_BACKGROUND",
-    "personal.long_term_goal": "PERSONAL_BACKGROUND",
-    "personal.timezone": "PERSONAL_BACKGROUND",
-    "personal.general_location": "PERSONAL_BACKGROUND",
-    "personal.daily_routine": "DAILY_PREFERENCE",
-    "preference.conversation_tone": "DAILY_PREFERENCE",
-    "lifestyle.food_preferences": "DAILY_PREFERENCE",
-    "lifestyle.activity_preferences": "DAILY_PREFERENCE",
-})
+MEMORY_TOPIC_TYPES = MappingProxyType(
+    {
+        "preference.language": "LEARNING_PREFERENCE",
+        "preference.explanation_style": "LEARNING_PREFERENCE",
+        "preference.detail_level": "LEARNING_PREFERENCE",
+        "preference.example_style": "LEARNING_PREFERENCE",
+        "preference.code_style": "LEARNING_PREFERENCE",
+        "preference.hint_style": "LEARNING_PREFERENCE",
+        "preference.pacing": "LEARNING_PREFERENCE",
+        "preference.knowledge_connections": "LEARNING_PREFERENCE",
+        "learning.goal": "LEARNING_GOAL",
+        "learning.current_topic": "LEARNING_GOAL",
+        "programming.level": "PROGRAMMING_BACKGROUND",
+        "programming.languages": "PROGRAMMING_BACKGROUND",
+        "programming.known_concepts": "PROGRAMMING_BACKGROUND",
+        "programming.tools": "PROGRAMMING_BACKGROUND",
+        "programming.environment": "PROGRAMMING_BACKGROUND",
+        "personal.preferred_name": "PERSONAL_BACKGROUND",
+        "personal.occupation": "PERSONAL_BACKGROUND",
+        "personal.interests": "PERSONAL_BACKGROUND",
+        "personal.long_term_goal": "PERSONAL_BACKGROUND",
+        "personal.timezone": "PERSONAL_BACKGROUND",
+        "personal.general_location": "PERSONAL_BACKGROUND",
+        "personal.daily_routine": "DAILY_PREFERENCE",
+        "preference.conversation_tone": "DAILY_PREFERENCE",
+        "lifestyle.food_preferences": "DAILY_PREFERENCE",
+        "lifestyle.activity_preferences": "DAILY_PREFERENCE",
+    }
+)
 
 # 从固定常量生成“key 和 type 必须配对”的检查表达式，不拼接任何用户输入。
 # 未来的迁移文件应保存当时的完整约束，不能导入此常量使旧迁移随代码改变。
@@ -63,8 +65,10 @@ class AgentMemory(Base):
     user_id: Mapped[int] = mapped_column(
         BIGINT(unsigned=True),
         ForeignKey(
-            "users.user_id", name="fk_agent_memory_user",
-            ondelete="RESTRICT", onupdate="RESTRICT",
+            "users.user_id",
+            name="fk_agent_memory_user",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         nullable=False,
     )

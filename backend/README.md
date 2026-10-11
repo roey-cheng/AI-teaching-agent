@@ -17,6 +17,37 @@
 
 虚拟环境相当于后端自己的工具箱：项目依赖安装在这里，不修改系统 Python 的依赖环境。
 
+### 编辑器红线与代码检查
+
+Python 3.14 是运行程序的解释器，不是插件；当前不需要改为 3.12。
+开发依赖中加入了 Ruff（常见代码问题和格式检查）与 Basedpyright（参数、返回值等类型检查），
+`uv sync` 会安装它们。根目录的 `.zed/settings.json` 为 Python 启用两种检查服务；
+`pyrightconfig.json` 指向 `backend/.venv` 并声明 `backend` 为 Python 导入根目录。
+检查强度为 Zed 默认的 `standard`，没有全局关闭类型报错。
+
+在 `backend/` 下运行：
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run basedpyright --project ../pyrightconfig.json
+uv run python -m unittest discover -s tests -q
+```
+
+检查范围包括应用、迁移、单元测试、MySQL 验收脚本和 `testing_support.py`，不只检查 Agent 文件夹。
+前端在 `frontend/` 下运行 `npm run build`，包含前端测试、TypeScript 类型检查和构建。
+
+本次整理除了排版，还明确了以下类型边界：
+
+- SSE 的 `event_name` 用 `Literal` 标明固定值，检查器可以据此区分事件及其字段。
+- 请求、数据库读取结果和测试样例使用 `model_validate` 校验原始数据，模型字段类型并未放宽。
+- 配置类的 `from_sources()` 仍调用 Pydantic Settings 从环境和 `.env` 读取必填项并验证，不需要在代码里重复填写凭据。
+- 测试先确认查询结果非空、返回类型符合预期，再检查字段；`testing_support.py` 提供这些运行时断言及不连接数据库的测试环境。
+- 少量有意的全异常捕获（例如 HTTP 脱敏、模型失败结算）保留局部 `noqa` 并注明原因；负面测试也保留了故意输入错误类型的用例，没有全局屏蔽检查或排除测试目录。
+
+如果 Zed 保留旧诊断，在命令面板运行 `editor: restart language server`；
+也可在 Python 工具链选择器中确认使用 `backend/.venv/bin/python`。
+
 ### 已安装的基础依赖
 
 | 依赖 | 本次安装版本 | 用途 |

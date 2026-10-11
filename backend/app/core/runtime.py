@@ -1,7 +1,7 @@
 """终端与 FastAPI 共用的启动顺序：进程锁→数据库检查→清理→开始服务。"""
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 
 from sqlalchemy import Engine
@@ -25,9 +25,11 @@ class BackendRuntime:
 
 
 @contextmanager
-def open_backend_runtime(engine: Engine, *, lock: RuntimeLock | None = None) -> Iterator[BackendRuntime]:
+def open_backend_runtime(
+    engine: Engine, *, lock: AbstractContextManager[RuntimeLock] | None = None
+) -> Iterator[BackendRuntime]:
     """引擎由调用方创建/释放；退出前调用方必须已等待所有生成和清理完成。"""
-    with (lock if lock is not None else RuntimeLock()) as held_lock:
+    with lock if lock is not None else RuntimeLock() as held_lock:
         try:
             check_database_ready(engine)
             factory = build_session_factory(engine)
@@ -36,7 +38,7 @@ def open_backend_runtime(engine: Engine, *, lock: RuntimeLock | None = None) -> 
             runtime = BackendRuntime(factory, registry, GenerationRateLimiter(), cleanup)
         except DatabaseNotReadyError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- 启动边界统一脱敏；异常仍通过 StartupCleanupError 传播。
             raise StartupCleanupError() from None
         # 不把正常运行期错误包成启动错误；进程锁覆盖整个服务生命周期。
         yield runtime

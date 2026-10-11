@@ -10,8 +10,12 @@ from pydantic import ValidationError
 from app.agent.input_policy import policy_for_model
 from app.cli.terminal import EventPrinter, Terminal, print_history
 from app.core.config import (
-    DatabaseSettings, ModelSettings, TracingSettings,
-    load_database_settings, load_model_settings, load_tracing_settings,
+    DatabaseSettings,
+    ModelSettings,
+    TracingSettings,
+    load_database_settings,
+    load_model_settings,
+    load_tracing_settings,
 )
 from app.core.runtime import open_backend_runtime
 from app.core.runtime_lock import RuntimeAlreadyActiveError
@@ -23,7 +27,10 @@ from app.services.authentication import get_current_user
 from app.services.chat_execution import execute_chat_turn
 from app.services.chat_sessions import create_chat_session
 from app.services.errors import (
-    ContextTooLargeError, EmailAlreadyRegisteredError, GenerationRateLimitError, InvalidCredentialsError,
+    ContextTooLargeError,
+    EmailAlreadyRegisteredError,
+    GenerationRateLimitError,
+    InvalidCredentialsError,
 )
 from app.services.generation_limit import GenerationRateLimiter
 from app.services.generation_registry import GenerationRegistry
@@ -63,9 +70,16 @@ def authenticate(terminal: Terminal, factory):
                     terminal.write("Passwords do not match.")
                     continue
                 name = terminal.read("Display name: ")
-                register_user(RegisterRequest(email=email, password=password, display_name=name), factory)
+                register_user(
+                    RegisterRequest.model_validate(
+                        {"email": email, "password": password, "display_name": name}
+                    ),
+                    factory,
+                )
                 terminal.write("Account created. Signing in...")
-            result = login_user(LoginRequest(email=email, password=password), factory)
+            result = login_user(
+                LoginRequest.model_validate({"email": email, "password": password}), factory
+            )
             return result
         except ValidationError:
             terminal.write("Invalid account input. Check email, password length, and display name.")
@@ -83,8 +97,13 @@ def authenticate(terminal: Terminal, factory):
 
 
 def run_chat(
-    terminal: Terminal, factory, model_settings: ModelSettings, tracing_settings: TracingSettings,
-    *, registry: GenerationRegistry | None = None, limiter: GenerationRateLimiter | None = None,
+    terminal: Terminal,
+    factory,
+    model_settings: ModelSettings,
+    tracing_settings: TracingSettings,
+    *,
+    registry: GenerationRegistry | None = None,
+    limiter: GenerationRateLimiter | None = None,
 ) -> int:
     """同步终端循环 + 持续复用的 Runner。等待键盘时没有 Agent 在后台运行。
 
@@ -137,61 +156,98 @@ def run_chat(
                     print_history(terminal, history)
                     if uncertain_request is not None:
                         if history.is_generating:
-                            terminal.write("The conversation is still busy. Sending remains disabled.")
+                            terminal.write(
+                                "The conversation is still busy. Sending remains disabled."
+                            )
                         else:
-                            terminal.write("History was re-read. No request will be resent automatically; any new text is a NEW question.")
+                            terminal.write(
+                                "History was re-read. No request will be resent automatically; any new text is a NEW question."
+                            )
                             uncertain_request = None
                     continue
                 if command == "/new":
                     if uncertain_request is not None:
-                        terminal.write("Check /history first. This conversation has an unconfirmed result.")
+                        terminal.write(
+                            "Check /history first. This conversation has an unconfirmed result."
+                        )
                         continue
                     chat = create_chat_session(user, factory)
                     terminal.write(f"New session: {chat.session_id}")
                     continue
                 if uncertain_request is not None:
-                    terminal.write("Sending is paused. Use /history to confirm the last request before sending again.")
+                    terminal.write(
+                        "Sending is paused. Use /history to confirm the last request before sending again."
+                    )
                     continue
                 try:
-                    request = SendMessageRequest(client_message_key=str(uuid4()), content=line)
+                    request = SendMessageRequest.model_validate(
+                        {"client_message_key": str(uuid4()), "content": line}
+                    )
                 except ValidationError:
                     terminal.write("A message must contain text and be at most 20,000 characters.")
                     continue
                 try:
-                    result = runner.run(execute_chat_turn(
-                        user, chat.session_id, request, factory, registry,
-                        model_settings=model_settings, tracing_settings=tracing_settings,
-                        input_policy=policy, check_new_message=lambda _request: limiter.check(user.user_id),
-                        on_event=printer,
-                    ))
+                    result = runner.run(
+                        execute_chat_turn(
+                            user,
+                            chat.session_id,
+                            request,
+                            factory,
+                            registry,
+                            model_settings=model_settings,
+                            tracing_settings=tracing_settings,
+                            input_policy=policy,
+                            check_new_message=lambda _request, user_id=user.user_id: limiter.check(
+                                user_id
+                            ),
+                            on_event=printer,
+                        )
+                    )
                     if isinstance(result, DuplicateMessageResponse):
-                        printer.line(f"[Duplicate] Existing attempt {result.attempt_id}: {result.status}. Use /history.")
+                        printer.line(
+                            f"[Duplicate] Existing attempt {result.attempt_id}: {result.status}. Use /history."
+                        )
                 except GenerationRateLimitError as error:
-                    printer.line(f"[RATE_LIMITED] Wait at least {error.retry_after_seconds} seconds before sending again.")
+                    printer.line(
+                        f"[RATE_LIMITED] Wait at least {error.retry_after_seconds} seconds before sending again."
+                    )
                 except ContextTooLargeError:
-                    printer.line("[CONTEXT_TOO_LARGE] Please shorten the question. It was not accepted.")
-                except Exception:
+                    printer.line(
+                        "[CONTEXT_TOO_LARGE] Please shorten the question. It was not accepted."
+                    )
+                except Exception:  # noqa: BLE001 -- 终端边界展示安全错误并继续收尾，不打印可能含凭据的原始异常。
                     # 不打印原始异常或盲目重发；历史无法核对时外层报错退出。
                     uncertain_request = request
-                    printer.line("[Unconfirmed] Check /history before sending again. The request will not be resent automatically.")
-    except (EOFError, KeyboardInterrupt):
+                    printer.line(
+                        "[Unconfirmed] Check /history before sending again. The request will not be resent automatically."
+                    )
+    except EOFError, KeyboardInterrupt:
         terminal.write("\nExiting after execution cleanup. Saved chat history is kept.")
-    except Exception:
-        terminal.write("Chat could not continue. Check configuration, login status, database availability, and saved history. No automatic retry.")
+    except Exception:  # noqa: BLE001 -- 终端边界展示安全错误并继续收尾，不打印可能含凭据的原始异常。
+        terminal.write(
+            "Chat could not continue. Check configuration, login status, database availability, and saved history. No automatic retry."
+        )
         code = 1
     finally:
         if token is not None:
             try:
                 logout_user(token, factory)
-                terminal.write("This terminal login has been revoked. Other logins and saved conversations are unchanged.")
-            except Exception:
-                terminal.write("Logout could not be confirmed. The terminal credential was not written to disk; its database expiry still applies.")
+                terminal.write(
+                    "This terminal login has been revoked. Other logins and saved conversations are unchanged."
+                )
+            except Exception:  # noqa: BLE001 -- 终端边界展示安全错误并继续收尾，不打印可能含凭据的原始异常。
+                terminal.write(
+                    "Logout could not be confirmed. The terminal credential was not written to disk; its database expiry still applies."
+                )
                 code = 1
     return code
 
 
 def launch(
-    terminal: Terminal, database: DatabaseSettings, model: ModelSettings, tracing: TracingSettings,
+    terminal: Terminal,
+    database: DatabaseSettings,
+    model: ModelSettings,
+    tracing: TracingSettings,
 ) -> int:
     """配置由 main 加载；测试传假的配置，避免误读用户 .env 或调用真实模型。"""
     engine = None
@@ -201,15 +257,27 @@ def launch(
         check_database_ready(engine)
         terminal.write(f"Database: {database.name} at {database.host}:{database.port}")
         terminal.write(f"Model: {model.name}. Real model requests may incur API charges.")
-        terminal.write("Each question may use one memory-check model call plus one answering call. Eligible long-term facts may be saved; use /memory to inspect them.")
-        terminal.write("Accounts, sessions, questions, and final answers will be saved to this database and will NOT be deleted on exit.")
+        terminal.write(
+            "Each question may use one memory-check model call plus one answering call. Eligible long-term facts may be saved; use /memory to inspect them."
+        )
+        terminal.write(
+            "Accounts, sessions, questions, and final answers will be saved to this database and will NOT be deleted on exit."
+        )
         if tracing.tracing:
-            terminal.write(f"LangSmith is ON: prompts, memory, reasoning, and answers may be uploaded to project {tracing.project}.")
+            terminal.write(
+                f"LangSmith is ON: prompts, memory, reasoning, and answers may be uploaded to project {tracing.project}."
+            )
         else:
             terminal.write("LangSmith is OFF.")
-        terminal.write("Local single-process tool only. Stop other chat-service/CLI processes using this database before continuing.")
-        terminal.write("After confirmation, startup reconciliation will mark abandoned generations interrupted or restore saved answers. It will not call the model or delete chat history.")
-        if terminal.read("Continue with this database and real model? [y/N]: ").strip().lower() not in ("y", "yes"):
+        terminal.write(
+            "Local single-process tool only. Stop other chat-service/CLI processes using this database before continuing."
+        )
+        terminal.write(
+            "After confirmation, startup reconciliation will mark abandoned generations interrupted or restore saved answers. It will not call the model or delete chat history."
+        )
+        if terminal.read(
+            "Continue with this database and real model? [y/N]: "
+        ).strip().lower() not in ("y", "yes"):
             terminal.write("Cancelled. No account, conversation, or model request was created.")
             return 0
         with open_backend_runtime(engine) as runtime:
@@ -217,19 +285,31 @@ def launch(
                 f"Startup reconciliation complete: {runtime.cleanup.interrupted} interrupted, "
                 f"{runtime.cleanup.restored_success} restored successful."
             )
-            return run_chat(terminal, runtime.session_factory, model, tracing,
-                            registry=runtime.registry, limiter=runtime.limiter)
+            return run_chat(
+                terminal,
+                runtime.session_factory,
+                model,
+                tracing,
+                registry=runtime.registry,
+                limiter=runtime.limiter,
+            )
     except RuntimeAlreadyActiveError:
-        terminal.write("Another chat process is using this project. Stop it before starting the terminal. No startup cleanup was run.")
+        terminal.write(
+            "Another chat process is using this project. Stop it before starting the terminal. No startup cleanup was run."
+        )
         return 1
     except DatabaseNotReadyError:
-        terminal.write("Database is not ready: MySQL 8.4+ and the current project migrations are required. Check Alembic status; no migration was run.")
+        terminal.write(
+            "Database is not ready: MySQL 8.4+ and the current project migrations are required. Check Alembic status; no migration was run."
+        )
         return 1
-    except (EOFError, KeyboardInterrupt):
+    except EOFError, KeyboardInterrupt:
         terminal.write("\nCancelled.")
         return 0
-    except Exception:
-        terminal.write("Startup failed. Check DB_* / MODEL_* / LANGSMITH_* settings, MySQL availability, and migrations. Do not share secrets.")
+    except Exception:  # noqa: BLE001 -- 终端边界展示安全错误并继续收尾，不打印可能含凭据的原始异常。
+        terminal.write(
+            "Startup failed. Check DB_* / MODEL_* / LANGSMITH_* settings, MySQL availability, and migrations. Do not share secrets."
+        )
         return 1
     finally:
         if engine is not None:
@@ -237,15 +317,25 @@ def launch(
 
 
 def main() -> int:
-    argparse.ArgumentParser(description="Interactive real-model chat using the existing backend and MySQL. No web server is started.").parse_args()
+    argparse.ArgumentParser(
+        description="Interactive real-model chat using the existing backend and MySQL. No web server is started."
+    ).parse_args()
     terminal = Terminal()
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        terminal.write("Run this command in an interactive terminal. Piped credentials and non-interactive input are not supported.")
+        terminal.write(
+            "Run this command in an interactive terminal. Piped credentials and non-interactive input are not supported."
+        )
         return 1
     try:
-        database, model, tracing = load_database_settings(), load_model_settings(), load_tracing_settings()
-    except Exception:
-        terminal.write("Invalid backend configuration. Check DB_* / MODEL_* / LANGSMITH_* in backend/.env; do not share API keys.")
+        database, model, tracing = (
+            load_database_settings(),
+            load_model_settings(),
+            load_tracing_settings(),
+        )
+    except Exception:  # noqa: BLE001 -- 终端边界展示安全错误并继续收尾，不打印可能含凭据的原始异常。
+        terminal.write(
+            "Invalid backend configuration. Check DB_* / MODEL_* / LANGSMITH_* in backend/.env; do not share API keys."
+        )
         return 1
     return launch(terminal, database, model, tracing)
 

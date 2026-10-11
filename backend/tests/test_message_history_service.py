@@ -1,34 +1,51 @@
 """历史读取离线测试；不连接数据库、不运行 Agent。"""
 
-from datetime import UTC, datetime
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import Message
-from app.schemas import UserResponse
+from app.schemas import UserMessageResponse, UserResponse
 from app.services.errors import MessageHistoryUnavailableError, SessionNotFoundError
 from app.services.generation_registry import GenerationRegistry
 from app.services.message_history import get_message_history
+from testing_support import require_type, require_value
 
 
 def question(number=1, status="FAILED"):
-    return Message(message_id=number, chat_session_id=10, role="USER", content="  Question\n    code",
-                   created_at=datetime(2026, 9, 25), attempt_id=str(uuid4()), generation_status=status,
-                   generation_error_code="GENERATION_TIMEOUT" if status == "FAILED" else None,
-                   generation_error_message="private-provider-url" if status == "FAILED" else None)
+    return Message(
+        message_id=number,
+        chat_session_id=10,
+        role="USER",
+        content="  Question\n    code",
+        created_at=datetime(2026, 9, 25),
+        attempt_id=str(uuid4()),
+        generation_status=status,
+        generation_error_code="GENERATION_TIMEOUT" if status == "FAILED" else None,
+        generation_error_message="private-provider-url" if status == "FAILED" else None,
+    )
 
 
 def answer(number=2, reply_to=1):
-    return Message(message_id=number, chat_session_id=10, role="ASSISTANT", content="Answer",
-                   in_reply_to_message_id=reply_to, created_at=datetime(2026, 9, 25), model_key="private-model")
+    return Message(
+        message_id=number,
+        chat_session_id=10,
+        role="ASSISTANT",
+        content="Answer",
+        in_reply_to_message_id=reply_to,
+        created_at=datetime(2026, 9, 25),
+        model_key="private-model",
+    )
 
 
 class MessageHistoryTest(unittest.TestCase):
     def setUp(self):
-        self.user = UserResponse(user_id="123", email="student@example.com", display_name="Student")
+        self.user = UserResponse.model_validate(
+            {"user_id": "123", "email": "student@example.com", "display_name": "Student"}
+        )
         self.factory = MagicMock()
         self.reader = self.factory.return_value.__enter__.return_value
         self.reader.scalar.return_value = 10
@@ -43,7 +60,9 @@ class MessageHistoryTest(unittest.TestCase):
         return get_message_history(self.user, "10", self.factory, self.registry)
 
     def test_empty_history_is_idle_without_writes(self):
-        self.assertEqual(self.read([]).model_dump(), {"session_id": "10", "is_generating": False, "items": []})
+        self.assertEqual(
+            self.read([]).model_dump(), {"session_id": "10", "is_generating": False, "items": []}
+        )
         self.factory.begin.assert_not_called()
         for name in ("add", "flush", "commit", "delete"):
             getattr(self.reader, name).assert_not_called()
@@ -70,8 +89,10 @@ class MessageHistoryTest(unittest.TestCase):
 
     def test_successful_pair_maps_answer_and_filters_internal_fields(self):
         result = self.read([question(status="SUCCEEDED"), answer()])
-        self.assertEqual(result.items[0].generation.assistant_message_id, "2")
-        self.assertFalse(result.items[0].generation.can_retry)
+        self.assertEqual(
+            require_type(result.items[0], UserMessageResponse).generation.assistant_message_id, "2"
+        )
+        self.assertFalse(require_type(result.items[0], UserMessageResponse).generation.can_retry)
         self.assertEqual(result.items[0].content, "  Question\n    code")
         self.assertEqual(result.items[0].created_at.tzinfo, UTC)
         self.assertNotIn("generation", result.items[1].model_dump())
@@ -80,19 +101,30 @@ class MessageHistoryTest(unittest.TestCase):
 
     def test_old_failure_remains_visible_but_only_last_failed_user_can_retry(self):
         result = self.read([question(), question(2)])
-        self.assertEqual([item.generation.can_retry for item in result.items], [False, True])
+        self.assertEqual(
+            [require_type(item, UserMessageResponse).generation.can_retry for item in result.items],
+            [False, True],
+        )
         result = self.read([question(), question(2, "SUCCEEDED"), answer(3, 2)])
-        self.assertFalse(result.items[0].generation.can_retry)
-        self.assertEqual(result.items[0].generation.status, "FAILED")
+        self.assertFalse(require_type(result.items[0], UserMessageResponse).generation.can_retry)
+        self.assertEqual(
+            require_type(result.items[0], UserMessageResponse).generation.status, "FAILED"
+        )
 
     def test_known_and_unknown_errors_use_safe_summaries(self):
         q = question()
         result = self.read([q])
-        self.assertEqual(result.items[0].generation.error.code, "GENERATION_TIMEOUT")
+        self.assertEqual(
+            require_value(require_type(result.items[0], UserMessageResponse).generation.error).code,
+            "GENERATION_TIMEOUT",
+        )
         self.assertNotIn("private-provider-url", result.model_dump_json())
         q.generation_error_code = "private-token-code"
         result = self.read([q])
-        self.assertEqual(result.items[0].generation.error.code, "GENERATION_FAILED")
+        self.assertEqual(
+            require_value(require_type(result.items[0], UserMessageResponse).generation.error).code,
+            "GENERATION_FAILED",
+        )
         self.assertNotIn("private", result.model_dump_json())
 
     def test_running_and_finalizing_are_busy_until_matching_release(self):
@@ -103,10 +135,12 @@ class MessageHistoryTest(unittest.TestCase):
         q.generation_error_code = "GENERATION_INTERRUPTED"
         result = self.read([q])
         self.assertTrue(result.is_generating)
-        self.assertFalse(result.items[0].generation.can_retry)
+        self.assertFalse(require_type(result.items[0], UserMessageResponse).generation.can_retry)
         with self.registry.locked(10) as slot:
-            slot.release(q.attempt_id)
-        self.assertTrue(self.read([q]).items[0].generation.can_retry)
+            slot.release(require_value(q.attempt_id))
+        self.assertTrue(
+            require_type(self.read([q]).items[0], UserMessageResponse).generation.can_retry
+        )
 
     def test_orphan_or_mismatched_running_is_not_reported_idle_or_repaired(self):
         q = question(status="RUNNING")
@@ -125,11 +159,18 @@ class MessageHistoryTest(unittest.TestCase):
             self.read([])
 
     def test_inconsistent_answer_links_and_missing_answers_are_safe_errors(self):
-        for messages in ([question(status="SUCCEEDED")], [answer()],
-                         [question(), answer()], [question(status="SUCCEEDED"), answer(2, 999)],
-                         [question(status="SUCCEEDED"), answer(), answer(3)],
-                         [question(2), question(1)]):
-            with self.subTest(count=len(messages)), self.assertRaises(MessageHistoryUnavailableError):
+        for messages in (
+            [question(status="SUCCEEDED")],
+            [answer()],
+            [question(), answer()],
+            [question(status="SUCCEEDED"), answer(2, 999)],
+            [question(status="SUCCEEDED"), answer(), answer(3)],
+            [question(2), question(1)],
+        ):
+            with (
+                self.subTest(count=len(messages)),
+                self.assertRaises(MessageHistoryUnavailableError),
+            ):
                 self.read(messages)
 
     def test_database_failures_are_redacted_not_retried_or_empty(self):

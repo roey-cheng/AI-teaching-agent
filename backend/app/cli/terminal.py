@@ -3,9 +3,9 @@
 import getpass
 import sys
 import warnings
-from typing import TextIO
+from typing import ClassVar, TextIO
 
-from app.schemas import MessageHistoryResponse
+from app.schemas import MessageDeltaData, MessageHistoryResponse, ReasoningDeltaData
 from app.services.chat_execution import ChatEvent
 
 
@@ -34,7 +34,7 @@ class Terminal:
 
 
 class EventPrinter:
-    STAGES = {
+    STAGES: ClassVar[dict[str, str]] = {
         "context_ready": "Conversation context is ready.",
         "agent_running": "Agent is running; waiting for model output.",
         "thinking": "Receiving model reasoning.",
@@ -59,10 +59,12 @@ class EventPrinter:
 
     async def __call__(self, item: ChatEvent) -> None:
         if item.event_name == "message_start":
-            self.line(f"[Started] Session {item.session_id}; question {item.user_message_id}; attempt {item.attempt_id}")
+            self.line(
+                f"[Started] Session {item.session_id}; question {item.user_message_id}; attempt {item.attempt_id}"
+            )
         elif item.event_name == "agent_progress":
             self.line(f"[Progress] {self.STAGES[item.stage]}")
-        elif item.event_name in ("reasoning_delta", "message_delta"):
+        elif isinstance(item, (ReasoningDeltaData, MessageDeltaData)):
             section = "Thinking" if item.event_name == "reasoning_delta" else "Answer"
             if self.section != section:
                 self.line(f"[{section}]")
@@ -70,10 +72,14 @@ class EventPrinter:
             self.terminal.write(item.text, end="")
         elif item.event_name == "message_done":
             # 正文已经逐段打印；此处不再重复整篇回答。
-            self.line(f"[Saved] Answer {item.assistant_message.message_id}. Use /history to read it from MySQL.")
+            self.line(
+                f"[Saved] Answer {item.assistant_message.message_id}. Use /history to read it from MySQL."
+            )
         elif item.event_name == "message_error":
             self.line(f"[Failed] {item.error.code}: {item.error.message}")
-            self.terminal.write("Any partial answer above was not saved as a completed reply. Retry is not available in this CLI yet.")
+            self.terminal.write(
+                "Any partial answer above was not saved as a completed reply. Retry is not available in this CLI yet."
+            )
 
 
 def print_history(terminal: Terminal, history: MessageHistoryResponse) -> None:

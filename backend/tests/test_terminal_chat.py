@@ -1,11 +1,11 @@
 """终端入口离线测试；通过依赖替身避免访问用户配置、数据库和真实模型。"""
 
 import asyncio
-from datetime import datetime
 import io
-from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from pydantic import SecretStr
@@ -15,15 +15,21 @@ from app.cli.chat import DatabaseNotReadyError, authenticate, check_database_rea
 from app.cli.terminal import EventPrinter, Terminal, terminal_text
 from app.core.config import DatabaseSettings, ModelSettings, TracingSettings
 from app.schemas import (
-    AgentProgressData, AssistantMessageResponse, MessageDeltaData, MessageDoneData, MessageHistoryResponse,
-    ReasoningDeltaData, UserResponse,
+    AgentProgressData,
+    AssistantMessageResponse,
+    MessageDeltaData,
+    MessageDoneData,
+    MessageHistoryResponse,
+    ReasoningDeltaData,
+    UserResponse,
 )
 from app.services.errors import AuthenticationRequiredError, InvalidCredentialsError
 
 
 class ScriptTerminal(Terminal):
     def __init__(self, lines=(), secrets=()):
-        super().__init__(io.StringIO())
+        self.buffer = io.StringIO()
+        super().__init__(self.buffer)
         self.lines, self.secrets = iter(lines), iter(secrets)
 
     def read(self, prompt):
@@ -40,11 +46,13 @@ class ScriptTerminal(Terminal):
 
 
 def model():
-    return ModelSettings(_env_file=None, provider="deepseek", name="deepseek-v4-pro", api_key="fake-model-key")
+    return ModelSettings.from_sources(
+        _env_file=None, provider="deepseek", name="deepseek-v4-pro", api_key="fake-model-key"
+    )
 
 
 def tracing():
-    return TracingSettings(_env_file=None, tracing=False, api_key=None)
+    return TracingSettings.from_sources(_env_file=None, tracing=False, api_key=None)
 
 
 class TerminalOutputTest(unittest.IsolatedAsyncioTestCase):
@@ -54,20 +62,36 @@ class TerminalOutputTest(unittest.IsolatedAsyncioTestCase):
         terminal = ScriptTerminal()
         terminal.write("\x1b", end="")
         terminal.write("]52;clipboard\x07", end="")
-        self.assertNotIn("\x1b", terminal.output.getvalue())
-        self.assertNotIn("\x07", terminal.output.getvalue())
+        self.assertNotIn("\x1b", terminal.buffer.getvalue())
+        self.assertNotIn("\x07", terminal.buffer.getvalue())
 
     async def test_event_sections_stream_and_done_does_not_repeat_answer(self):
         terminal, attempt = ScriptTerminal(), str(uuid4())
         printer = EventPrinter(terminal)
-        await printer(AgentProgressData(attempt_id=attempt, stage="thinking"))
-        await printer(ReasoningDeltaData(attempt_id=attempt, text="reason"))
-        await printer(MessageDeltaData(attempt_id=attempt, text="answer-unique"))
-        await printer(MessageDoneData(attempt_id=attempt, assistant_message=AssistantMessageResponse(
-            message_id="2", role="ASSISTANT", content="answer-unique", in_reply_to_message_id="1",
-            created_at=datetime(2026, 10, 11),
-        )))
-        text = terminal.output.getvalue()
+        await printer(
+            AgentProgressData.model_validate({"attempt_id": attempt, "stage": "thinking"})
+        )
+        await printer(ReasoningDeltaData.model_validate({"attempt_id": attempt, "text": "reason"}))
+        await printer(
+            MessageDeltaData.model_validate({"attempt_id": attempt, "text": "answer-unique"})
+        )
+        await printer(
+            MessageDoneData.model_validate(
+                {
+                    "attempt_id": attempt,
+                    "assistant_message": AssistantMessageResponse.model_validate(
+                        {
+                            "message_id": "2",
+                            "role": "ASSISTANT",
+                            "content": "answer-unique",
+                            "in_reply_to_message_id": "1",
+                            "created_at": datetime(2026, 10, 11),
+                        }
+                    ),
+                }
+            )
+        )
+        text = terminal.buffer.getvalue()
         self.assertIn("[Thinking]\nreason", text)
         self.assertIn("[Answer]\nanswer-unique", text)
         self.assertEqual(text.count("answer-unique"), 1)
@@ -76,24 +100,34 @@ class TerminalOutputTest(unittest.IsolatedAsyncioTestCase):
 
 class TerminalAuthenticationTest(unittest.TestCase):
     def test_register_then_login_hides_password(self):
-        terminal = ScriptTerminal(["r", "a@example.com", "Test"], ["fake-password", "fake-password"])
-        with patch("app.cli.chat.register_user") as register, patch("app.cli.chat.login_user") as login:
+        terminal = ScriptTerminal(
+            ["r", "a@example.com", "Test"], ["fake-password", "fake-password"]
+        )
+        with (
+            patch("app.cli.chat.register_user") as register,
+            patch("app.cli.chat.login_user") as login,
+        ):
             self.assertIs(authenticate(terminal, "factory"), login.return_value)
         self.assertEqual(register.call_args.args[0].display_name, "Test")
         self.assertEqual(login.call_args.args[0].password.get_secret_value(), "fake-password")
-        self.assertNotIn("fake-password", terminal.output.getvalue())
+        self.assertNotIn("fake-password", terminal.buffer.getvalue())
 
     def test_three_failed_logins_stop_without_fourth_call(self):
         terminal = ScriptTerminal(["l", "a@example.com"] * 3, ["fake-password"] * 3)
         with patch("app.cli.chat.login_user", side_effect=InvalidCredentialsError()) as login:
             self.assertIsNone(authenticate(terminal, "factory"))
         self.assertEqual(login.call_count, 3)
-        self.assertIn("Three failed logins", terminal.output.getvalue())
+        self.assertIn("Three failed logins", terminal.buffer.getvalue())
 
     def test_password_mismatch_and_bad_input_do_not_register(self):
-        terminal = ScriptTerminal(["r", "a@example.com", "r", "invalid-email", "Test", "q"],
-                                  ["password-a", "password-b", "password-a", "password-a"])
-        with patch("app.cli.chat.register_user") as register, patch("app.cli.chat.login_user") as login:
+        terminal = ScriptTerminal(
+            ["r", "a@example.com", "r", "invalid-email", "Test", "q"],
+            ["password-a", "password-b", "password-a", "password-a"],
+        )
+        with (
+            patch("app.cli.chat.register_user") as register,
+            patch("app.cli.chat.login_user") as login,
+        ):
             self.assertIsNone(authenticate(terminal, "factory"))
         register.assert_not_called()
         login.assert_not_called()
@@ -101,17 +135,27 @@ class TerminalAuthenticationTest(unittest.TestCase):
 
 class ChatLoopTest(unittest.TestCase):
     def setUp(self):
-        self.user = UserResponse(user_id="1", email="a@example.com", display_name="Test")
+        self.user = UserResponse.model_validate(
+            {"user_id": "1", "email": "a@example.com", "display_name": "Test"}
+        )
         self.token = SecretStr("fake-login-token")
         self.mocks = {}
-        for name in ("authenticate", "get_current_user", "create_chat_session", "get_message_history", "logout_user"):
+        for name in (
+            "authenticate",
+            "get_current_user",
+            "create_chat_session",
+            "get_message_history",
+            "logout_user",
+        ):
             p = patch(f"app.cli.chat.{name}")
             self.mocks[name] = p.start()
             self.addCleanup(p.stop)
         self.mocks["authenticate"].return_value = SimpleNamespace(token=self.token)
         self.mocks["get_current_user"].return_value = self.user
         self.mocks["create_chat_session"].return_value = SimpleNamespace(session_id="10")
-        self.mocks["get_message_history"].return_value = MessageHistoryResponse(session_id="10", is_generating=False, items=[])
+        self.mocks["get_message_history"].return_value = MessageHistoryResponse.model_validate(
+            {"session_id": "10", "is_generating": False, "items": []}
+        )
         p = patch("app.cli.chat.execute_chat_turn", new_callable=AsyncMock)
         self.execute = p.start()
         self.addCleanup(p.stop)
@@ -119,7 +163,7 @@ class ChatLoopTest(unittest.TestCase):
     def run_lines(self, lines):
         terminal = ScriptTerminal(lines)
         code = run_chat(terminal, "factory", model(), tracing())
-        return code, terminal.output.getvalue()
+        return code, terminal.buffer.getvalue()
 
     def test_blank_commands_history_new_and_quit_do_not_call_model(self):
         code, text = self.run_lines([" ", "/nope", "/help", "/history", "/new", "/quit"])
@@ -132,7 +176,11 @@ class ChatLoopTest(unittest.TestCase):
 
     def test_memory_command_rechecks_user_and_queries_without_model(self):
         from app.schemas import MemoryListResponse
-        with patch("app.cli.chat.list_profile_memory", return_value=MemoryListResponse(items=[])) as read:
+
+        with patch(
+            "app.cli.chat.list_profile_memory",
+            return_value=MemoryListResponse.model_validate({"items": []}),
+        ) as read:
             code, text = self.run_lines(["/memory", "/quit"])
         self.assertEqual(code, 0)
         read.assert_called_once_with(self.user, "factory")
@@ -143,6 +191,7 @@ class ChatLoopTest(unittest.TestCase):
     def test_input_preserved_unique_keys_shared_registry_and_real_rate_limit(self):
         async def accepted(*args, **kwargs):
             kwargs["check_new_message"](args[2])
+
         self.execute.side_effect = accepted
         code, text = self.run_lines(["  question  "] * 11 + ["/quit"])
         self.assertEqual(code, 0)
@@ -188,7 +237,9 @@ class ChatLoopTest(unittest.TestCase):
     def test_runner_sigint_waits_for_executor_cleanup_before_logout(self):
         import os
         import signal
+
         steps = []
+
         async def running(*args, **kwargs):
             asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGINT)
             try:
@@ -196,6 +247,7 @@ class ChatLoopTest(unittest.TestCase):
             finally:
                 await asyncio.sleep(0)
                 steps.append("execution-cleaned")
+
         self.execute.side_effect = running
         self.mocks["logout_user"].side_effect = lambda *args: steps.append("logged-out")
         code, _ = self.run_lines(["question"])
@@ -212,36 +264,51 @@ class ChatLoopTest(unittest.TestCase):
 
 class TerminalStartupTest(unittest.TestCase):
     def database(self):
-        return DatabaseSettings(_env_file=None, name="fake_db", user="fake_user", password="fake-db-secret")
+        return DatabaseSettings.from_sources(
+            _env_file=None, name="fake_db", user="fake_user", password="fake-db-secret"
+        )
 
     def test_declining_does_not_start_chat_or_expose_credentials(self):
         terminal = ScriptTerminal(["n"])
-        with patch("app.cli.chat.build_database_engine") as engine, patch("app.cli.chat.check_database_ready"), \
-                patch("app.cli.chat.run_chat") as chat, patch("app.cli.chat.open_backend_runtime") as runtime:
+        with (
+            patch("app.cli.chat.build_database_engine") as engine,
+            patch("app.cli.chat.check_database_ready"),
+            patch("app.cli.chat.run_chat") as chat,
+            patch("app.cli.chat.open_backend_runtime") as runtime,
+        ):
             self.assertEqual(launch(terminal, self.database(), model(), tracing()), 0)
             chat.assert_not_called()
             runtime.assert_not_called()
             engine.return_value.dispose.assert_called_once()
-        self.assertNotIn("fake-db-secret", terminal.output.getvalue())
-        self.assertNotIn("fake-model-key", terminal.output.getvalue())
+        self.assertNotIn("fake-db-secret", terminal.buffer.getvalue())
+        self.assertNotIn("fake-model-key", terminal.buffer.getvalue())
 
     def test_unavailable_db_stops_before_confirmation_or_model(self):
         terminal = ScriptTerminal()
-        with patch("app.cli.chat.build_database_engine") as engine, \
-                patch("app.cli.chat.check_database_ready", side_effect=SQLAlchemyError("fake-db-secret")), \
-                patch("app.cli.chat.run_chat") as chat:
+        with (
+            patch("app.cli.chat.build_database_engine") as engine,
+            patch(
+                "app.cli.chat.check_database_ready", side_effect=SQLAlchemyError("fake-db-secret")
+            ),
+            patch("app.cli.chat.run_chat") as chat,
+        ):
             self.assertEqual(launch(terminal, self.database(), model(), tracing()), 1)
             chat.assert_not_called()
             engine.return_value.dispose.assert_called_once()
-        self.assertNotIn("fake-db-secret", terminal.output.getvalue())
+        self.assertNotIn("fake-db-secret", terminal.buffer.getvalue())
 
     def test_tracing_warning_precedes_confirmation(self):
         terminal = ScriptTerminal(["n"])
-        config = TracingSettings(_env_file=None, tracing=True, api_key="fake-trace-secret")
-        with patch("app.cli.chat.build_database_engine"), patch("app.cli.chat.check_database_ready"):
+        config = TracingSettings.from_sources(
+            _env_file=None, tracing=True, api_key="fake-trace-secret"
+        )
+        with (
+            patch("app.cli.chat.build_database_engine"),
+            patch("app.cli.chat.check_database_ready"),
+        ):
             launch(terminal, self.database(), model(), config)
-        self.assertIn("LangSmith is ON", terminal.output.getvalue())
-        self.assertNotIn("fake-trace-secret", terminal.output.getvalue())
+        self.assertIn("LangSmith is ON", terminal.buffer.getvalue())
+        self.assertNotIn("fake-trace-secret", terminal.buffer.getvalue())
 
     def test_preflight_checks_heads_and_tables_without_writing(self):
         engine = MagicMock()
@@ -249,9 +316,18 @@ class TerminalStartupTest(unittest.TestCase):
         connection.dialect.name = "mysql"
         connection.dialect.is_mariadb = False
         connection.dialect.server_version_info = (8, 4, 11)
-        with patch("app.db.readiness.MigrationContext") as context, patch("app.db.readiness.inspect") as inspector:
+        with (
+            patch("app.db.readiness.MigrationContext") as context,
+            patch("app.db.readiness.inspect") as inspector,
+        ):
             context.configure.return_value.get_current_heads.return_value = ("20260925_0001",)
-            inspector.return_value.get_table_names.return_value = ["users", "auth_sessions", "chat_sessions", "messages", "agent_memory"]
+            inspector.return_value.get_table_names.return_value = [
+                "users",
+                "auth_sessions",
+                "chat_sessions",
+                "messages",
+                "agent_memory",
+            ]
             check_database_ready(engine)
             context.configure.return_value.get_current_heads.return_value = ()
             with self.assertRaises(DatabaseNotReadyError):
@@ -260,31 +336,49 @@ class TerminalStartupTest(unittest.TestCase):
 
     def test_non_interactive_main_never_reads_credentials_or_database(self):
         from app.cli.chat import main
-        with patch("sys.argv", ["chat"]), patch("sys.stdin.isatty", return_value=False), \
-                patch("app.cli.chat.Terminal"), patch("app.cli.chat.load_database_settings") as load:
+
+        with (
+            patch("sys.argv", ["chat"]),
+            patch("sys.stdin.isatty", return_value=False),
+            patch("app.cli.chat.Terminal"),
+            patch("app.cli.chat.load_database_settings") as load,
+        ):
             self.assertEqual(main(), 1)
         load.assert_not_called()
 
     def test_confirmation_then_cleanup_then_chat_with_shared_runtime(self):
         terminal = ScriptTerminal(["y"])
-        with patch("app.cli.chat.build_database_engine"), patch("app.cli.chat.check_database_ready"), \
-                patch("app.cli.chat.open_backend_runtime") as scope, patch("app.cli.chat.run_chat", return_value=0) as chat:
+        with (
+            patch("app.cli.chat.build_database_engine"),
+            patch("app.cli.chat.check_database_ready"),
+            patch("app.cli.chat.open_backend_runtime") as scope,
+            patch("app.cli.chat.run_chat", return_value=0) as chat,
+        ):
             runtime = scope.return_value.__enter__.return_value
             runtime.cleanup.interrupted = 2
             runtime.cleanup.restored_success = 1
             self.assertEqual(launch(terminal, self.database(), model(), tracing()), 0)
-            chat.assert_called_once_with(terminal, runtime.session_factory, unittest.mock.ANY, unittest.mock.ANY,
-                                         registry=runtime.registry, limiter=runtime.limiter)
+            chat.assert_called_once_with(
+                terminal,
+                runtime.session_factory,
+                ANY,
+                ANY,
+                registry=runtime.registry,
+                limiter=runtime.limiter,
+            )
             scope.return_value.__exit__.assert_called_once()
-        self.assertIn("2 interrupted, 1 restored successful", terminal.output.getvalue())
+        self.assertIn("2 interrupted, 1 restored successful", terminal.buffer.getvalue())
 
     def test_cleanup_failure_does_not_start_login_or_chat(self):
         from app.services.errors import StartupCleanupError
 
         terminal = ScriptTerminal(["y"])
-        with patch("app.cli.chat.build_database_engine"), patch("app.cli.chat.check_database_ready"), \
-                patch("app.cli.chat.open_backend_runtime", side_effect=StartupCleanupError()), \
-                patch("app.cli.chat.run_chat") as chat:
+        with (
+            patch("app.cli.chat.build_database_engine"),
+            patch("app.cli.chat.check_database_ready"),
+            patch("app.cli.chat.open_backend_runtime", side_effect=StartupCleanupError()),
+            patch("app.cli.chat.run_chat") as chat,
+        ):
             self.assertEqual(launch(terminal, self.database(), model(), tracing()), 1)
             chat.assert_not_called()
-        self.assertIn("Startup failed", terminal.output.getvalue())
+        self.assertIn("Startup failed", terminal.buffer.getvalue())
