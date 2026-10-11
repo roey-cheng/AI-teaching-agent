@@ -2,6 +2,7 @@
 
 import ast
 import unittest
+from contextlib import nullcontext
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -21,7 +22,8 @@ from app.db.base import Base
 from testing_support import require_value
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISION = "20260925_0001"
+INITIAL_REVISION = "20260925_0001"
+HEAD_REVISION = "20261012_0002"
 
 
 def make_config(output=None):
@@ -48,23 +50,26 @@ def constraints_for(table):
 class MigrationTest(unittest.TestCase):
     def setUp(self):
         self.script = ScriptDirectory.from_config(make_config())
-        self.revision = self.script.get_revision(REVISION).module
+        self.revision = self.script.get_revision(INITIAL_REVISION).module
+        self.head_revision = self.script.get_revision(HEAD_REVISION).module
 
-    def test_single_initial_revision_and_no_live_model_imports(self):
-        self.assertEqual(self.script.get_heads(), [REVISION])
+    def test_linear_revision_chain_and_no_live_model_imports(self):
+        self.assertEqual(self.script.get_heads(), [HEAD_REVISION])
         self.assertIsNone(self.revision.down_revision)
-        source = Path(require_value(self.revision.__file__)).read_text()
-        tree = ast.parse(source)
-        imports = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                imports.append(node.module or "")
-            elif isinstance(node, ast.Import):
-                imports.extend(alias.name for alias in node.names)
-        self.assertFalse(any(name == "app" or name.startswith("app.") for name in imports))
-        self.assertNotIn("create_all", source)
+        self.assertEqual(self.head_revision.down_revision, INITIAL_REVISION)
+        for revision in (self.revision, self.head_revision):
+            source = Path(require_value(revision.__file__)).read_text()
+            tree = ast.parse(source)
+            imports = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    imports.append(node.module or "")
+                elif isinstance(node, ast.Import):
+                    imports.extend(alias.name for alias in node.names)
+            self.assertFalse(any(name == "app" or name.startswith("app.") for name in imports))
+            self.assertNotIn("create_all", source)
 
-    def test_upgrade_snapshot_matches_all_five_models(self):
+    def test_upgrade_snapshots_match_all_models(self):
         metadata = sa.MetaData()
         created = []
 
@@ -76,15 +81,22 @@ class MigrationTest(unittest.TestCase):
             table = metadata.tables[table_name]
             return sa.Index(name, *(table.c[column] for column in columns), **options)
 
-        with (
-            patch.object(self.revision.context, "is_offline_mode", return_value=True),
-            patch.object(self.revision.op, "create_table", side_effect=create_table),
-            patch.object(self.revision.op, "create_index", side_effect=create_index),
-        ):
-            self.revision.upgrade()
+        for revision in (self.revision, self.head_revision):
+            offline = (
+                patch.object(revision.context, "is_offline_mode", return_value=True)
+                if hasattr(revision, "context")
+                else nullcontext()
+            )
+            with (
+                offline,
+                patch.object(revision.op, "create_table", side_effect=create_table),
+                patch.object(revision.op, "create_index", side_effect=create_index),
+                patch.object(revision.op, "execute"),
+            ):
+                revision.upgrade()
 
         self.assertEqual(set(metadata.tables), set(Base.metadata.tables))
-        self.assertEqual(len(created), 5)
+        self.assertEqual(len(created), 7)
         for name, table in metadata.tables.items():
             model = Base.metadata.tables[name]
             with self.subTest(table=name):
@@ -120,11 +132,12 @@ class MigrationTest(unittest.TestCase):
         sql = output.getvalue()
         for name in Base.metadata.tables:
             self.assertEqual(sql.count(f"CREATE TABLE {name} ("), 1)
-        self.assertEqual(sql.count("CREATE TABLE "), 6)  # 五张业务表 + 版本表。
+        self.assertEqual(sql.count("CREATE TABLE "), 8)  # 七张业务/控制表 + 版本表。
         for expected in (
             "CREATE TABLE alembic_version",
             "INSERT INTO alembic_version",
-            REVISION,
+            INITIAL_REVISION,
+            HEAD_REVISION,
             "BIGINT UNSIGNED",
             "AUTO_INCREMENT",
             "DATETIME(6)",
@@ -139,10 +152,18 @@ class MigrationTest(unittest.TestCase):
     def test_downgrade_sql_drops_children_before_parents(self):
         output = StringIO()
         with patch("pymysql.connect") as connect:
-            command.downgrade(make_config(output), f"{REVISION}:base", sql=True)
+            command.downgrade(make_config(output), f"{HEAD_REVISION}:base", sql=True)
         connect.assert_not_called()
         sql = output.getvalue()
-        expected_order = ["messages", "agent_memory", "chat_sessions", "auth_sessions", "users"]
+        expected_order = [
+            "generation_attempts",
+            "generation_control",
+            "messages",
+            "agent_memory",
+            "chat_sessions",
+            "auth_sessions",
+            "users",
+        ]
         positions = [sql.index(f"DROP TABLE {name};") for name in expected_order]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("DELETE FROM alembic_version", sql)
@@ -253,7 +274,7 @@ class MigrationTest(unittest.TestCase):
         source = template.render(
             message="Example migration",
             up_revision="example",
-            down_revision=REVISION,
+            down_revision=HEAD_REVISION,
             create_date="2026-09-25",
             imports="",
             branch_labels=None,

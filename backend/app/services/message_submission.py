@@ -22,6 +22,7 @@ from app.services.errors import (
     SessionBusyError,
     SessionNotFoundError,
 )
+from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 
 
@@ -71,6 +72,7 @@ def _settle_interrupted(
     registry: GenerationRegistry,
     *,
     previous_attempt_id: str | None = None,
+    quota: GenerationQuota | None = None,
 ) -> None:
     """只结算本次编号；独立核对 INSERT/重试 UPDATE 的提交结果，不重发请求。
 
@@ -106,12 +108,15 @@ def _settle_interrupted(
                         raise MessageSendUnavailableError()
                     _answer_id(session, question)  # 不覆盖已成功的回复，矛盾状态则保留占用待核对。
                     if question.generation_status == "RUNNING":
+                        now = datetime.now(UTC).replace(tzinfo=None)
                         question.generation_status = "FAILED"
                         question.generation_error_code = "GENERATION_INTERRUPTED"
                         question.generation_error_message = (
                             "Response generation was interrupted. Please try again."
                         )
-                        question.updated_at = datetime.now(UTC).replace(tzinfo=None)
+                        question.updated_at = now
+                        if quota is not None:
+                            quota.finish(session, attempt_id, "FAILED", now)
                         session.flush()
             # 无记录=已确认未落库；有记录=最终状态已确认提交。此时才能释放。
             slot.release(attempt_id)
@@ -130,6 +135,7 @@ def accept_user_message(
     *,
     check_new_message: Callable[[SendMessageRequest], None],
     input_policy: AgentInputPolicy,
+    quota: GenerationQuota | None = None,
 ) -> Iterator[AcceptedMessage | DuplicateMessageResponse]:
     """仅供后端调用，使用 with；真实执行必须在作用域内完成，不能后台脱离它。
 
@@ -230,6 +236,14 @@ def accept_user_message(
                 chat.updated_at = now
                 chat.last_activity_at = now
                 session.flush()
+                if quota is not None:
+                    quota.admit(
+                        session,
+                        user_id=user_id,
+                        message_id=question.message_id,
+                        attempt_id=owned_attempt,
+                        now=now,
+                    )
                 result = AcceptedMessage(
                     str(chat_id), str(question.message_id), owned_attempt, prepared_input
                 )
@@ -243,6 +257,7 @@ def accept_user_message(
                 owned_attempt,
                 session_factory,
                 registry,
+                quota=quota,
             )
         if isinstance(error, (SQLAlchemyError, ValidationError)):
             raise MessageSendUnavailableError() from None
@@ -260,4 +275,5 @@ def accept_user_message(
                 owned_attempt,
                 session_factory,
                 registry,
+                quota=quota,
             )

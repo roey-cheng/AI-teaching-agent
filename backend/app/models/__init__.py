@@ -3,7 +3,16 @@
 from app.models.agent_memory import AgentMemory
 from app.models.auth_session import AuthSession
 from app.models.chat_session import ChatSession
+from app.models.generation_attempt import GenerationAttempt, GenerationControl
 from app.models.message import Message
 from app.models.user import User
 
-__all__ = ["AgentMemory", "AuthSession", "ChatSession", "Message", "User"]
+__all__ = [
+    "AgentMemory",
+    "AuthSession",
+    "ChatSession",
+    "GenerationAttempt",
+    "GenerationControl",
+    "Message",
+    "User",
+]

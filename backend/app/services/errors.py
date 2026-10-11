@@ -18,6 +18,27 @@ class RegistrationUnavailableError(Exception):
         )
 
 
+class TurnstileRequiredError(Exception):
+    code = "TURNSTILE_REQUIRED"
+
+    def __init__(self) -> None:
+        super().__init__("Complete the human verification before registering.")
+
+
+class TurnstileFailedError(Exception):
+    code = "TURNSTILE_FAILED"
+
+    def __init__(self) -> None:
+        super().__init__("Human verification failed or expired. Please try again.")
+
+
+class TurnstileUnavailableError(Exception):
+    code = "TURNSTILE_UNAVAILABLE"
+
+    def __init__(self) -> None:
+        super().__init__("Human verification is temporarily unavailable. Please try again.")
+
+
 class InvalidCredentialsError(Exception):
     code = "INVALID_CREDENTIALS"
 
@@ -121,6 +142,35 @@ class GenerationRateLimitError(Exception):
     def __init__(self, retry_after_seconds: int):
         self.retry_after_seconds = retry_after_seconds
         super().__init__("Too many new generations. Please wait before sending another message.")
+
+
+class GenerationQuotaError(Exception):
+    code = "GENERATION_QUOTA_EXCEEDED"
+
+    def __init__(self, retry_after_seconds: int, message: str):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message)
+
+
+class UserDailyQuotaExceededError(GenerationQuotaError):
+    code = "USER_DAILY_QUOTA_EXCEEDED"
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__(retry_after_seconds, "Your daily chat limit has been reached.")
+
+
+class GlobalDailyQuotaExceededError(GenerationQuotaError):
+    code = "GLOBAL_DAILY_QUOTA_EXCEEDED"
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__(retry_after_seconds, "The site's daily chat limit has been reached.")
+
+
+class GlobalConcurrencyLimitError(GenerationQuotaError):
+    code = "GLOBAL_CONCURRENCY_LIMIT"
+
+    def __init__(self):
+        super().__init__(15, "The site is currently handling the maximum number of responses.")
 
 
 class MemoryUnavailableError(Exception):

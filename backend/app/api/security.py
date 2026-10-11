@@ -4,6 +4,8 @@ import math
 import time
 from collections import deque
 from hashlib import sha256
+from hmac import compare_digest
+from ipaddress import ip_address
 from threading import Lock
 
 from fastapi import Request
@@ -13,6 +15,8 @@ from pydantic import SecretStr
 from app.api.errors import APIError
 
 COOKIE_NAME = "chat_session"
+PROXY_SECRET_HEADER = "x-ai-proxy-secret"
+CLIENT_IP_HEADER = "x-client-ip"
 
 
 class AccountRateLimiter:
@@ -54,6 +58,24 @@ class AccountRateLimiter:
 def cookie_token(request: Request) -> SecretStr | None:
     raw = request.cookies.get(COOKIE_NAME)
     return SecretStr(raw) if raw else None
+
+
+def trusted_client_ip(request: Request) -> str:
+    """只在共享密钥通过后采用 Pages 提供的原始 IP；本地继续使用连接地址。"""
+    settings = request.app.state.http_settings
+    if not settings.require_trusted_proxy:
+        return request.client.host if request.client else "unknown"
+    configured = settings.proxy_shared_secret
+    supplied = request.headers.get(PROXY_SECRET_HEADER, "")
+    if configured is None or not compare_digest(supplied, configured.get_secret_value()):
+        raise APIError(403, "TRUSTED_PROXY_REQUIRED", "This API must be accessed through the site.")
+    raw_ip = request.headers.get(CLIENT_IP_HEADER, "")
+    try:
+        return str(ip_address(raw_ip))
+    except ValueError:
+        raise APIError(
+            403, "TRUSTED_PROXY_REQUIRED", "Trusted client information is invalid."
+        ) from None
 
 
 def check_origin(request: Request) -> None:
@@ -100,13 +122,13 @@ class AccountRoute(APIRoute):
         original = super().get_route_handler()
 
         async def guarded(request: Request):
+            request.state.client_ip = trusted_client_ip(request)
             if request.method == "POST":
                 check_origin(request)
             reject_query_parameters(request)
             name = request.url.path.rsplit("/", 1)[-1]
             if request.method == "POST" and name in {"login", "register"}:
-                # 不直接信任 X-Forwarded-For；反向代理信任范围需由部署配置限制。
-                ip = request.client.host if request.client else "unknown"
+                ip = request.state.client_ip
                 request.app.state.account_limiter.consume(
                     name + "_ip", ip, 60 if name == "login" else 3600
                 )
@@ -126,6 +148,7 @@ class ResourceRoute(APIRoute):
         original = super().get_route_handler()
 
         async def guarded(request: Request):
+            request.state.client_ip = trusted_client_ip(request)
             write = request.method in {"POST", "PATCH"}
             if write:
                 check_origin(request)

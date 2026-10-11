@@ -27,6 +27,7 @@ from app.services.errors import (
     SessionBusyError,
     StaleAttemptError,
 )
+from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.message_submission import (
     AcceptedMessage,
@@ -47,6 +48,7 @@ def accept_failed_message_retry(
     *,
     check_retry: Callable[[RetryMessageRequest], None],
     input_policy: AgentInputPolicy,
+    quota: GenerationQuota | None = None,
 ) -> Iterator[AcceptedMessage | DuplicateMessageResponse]:
     """调用方先认证；必须与新发送共享 registry、每用户生成限流器及执行作用域。
 
@@ -71,6 +73,7 @@ def accept_failed_message_retry(
             session_factory,
             registry,
             previous_attempt_id=request.failed_attempt_id,
+            quota=quota,
         )
 
     try:
@@ -160,6 +163,14 @@ def accept_failed_message_retry(
                 question.updated_at = now
                 chat.updated_at = chat.last_activity_at = now
                 session.flush()
+                if quota is not None:
+                    quota.admit(
+                        session,
+                        user_id=user_id,
+                        message_id=question_id,
+                        attempt_id=owned_attempt,
+                        now=now,
+                    )
                 result = AcceptedMessage(str(chat_id), str(question_id), owned_attempt, prepared)
     except BaseException as error:
         if owned_attempt is not None:

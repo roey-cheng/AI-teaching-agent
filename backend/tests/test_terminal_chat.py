@@ -320,13 +320,15 @@ class TerminalStartupTest(unittest.TestCase):
             patch("app.db.readiness.MigrationContext") as context,
             patch("app.db.readiness.inspect") as inspector,
         ):
-            context.configure.return_value.get_current_heads.return_value = ("20260925_0001",)
+            context.configure.return_value.get_current_heads.return_value = ("20261012_0002",)
             inspector.return_value.get_table_names.return_value = [
                 "users",
                 "auth_sessions",
                 "chat_sessions",
                 "messages",
                 "agent_memory",
+                "generation_control",
+                "generation_attempts",
             ]
             check_database_ready(engine)
             context.configure.return_value.get_current_heads.return_value = ()

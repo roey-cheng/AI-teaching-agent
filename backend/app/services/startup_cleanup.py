@@ -13,6 +13,7 @@ from app.models import ChatSession, Message
 from app.schemas import AssistantMessageResponse
 from app.schemas._types import UUIDString
 from app.services.errors import StartupCleanupError
+from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import PUBLIC_GENERATION_ERRORS
 
@@ -30,6 +31,7 @@ def reconcile_interrupted_generations(
     registry: GenerationRegistry,
     *,
     runtime_lock: RuntimeLock,
+    quota: GenerationQuota | None = None,
 ) -> StartupCleanupResult:
     """仅在启动入口调用，取得进程锁且旧进程已退出后、接受业务请求前执行。
 
@@ -108,6 +110,13 @@ def reconcile_interrupted_generations(
                             ]
                             interrupted += 1
                         question.updated_at = now
+                        if quota is not None:
+                            quota.finish(
+                                session,
+                                question.attempt_id,
+                                question.generation_status,
+                                now,
+                            )
                 session.flush()
                 runtime_lock.require_held()
             return StartupCleanupResult(interrupted, restored)  # 提交返回成功后才报告。

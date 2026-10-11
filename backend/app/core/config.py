@@ -132,3 +132,74 @@ class TracingSettings(EnvironmentSettings):
 
 def load_tracing_settings() -> TracingSettings:
     return TracingSettings()
+
+
+class TurnstileSettings(EnvironmentSettings):
+    """公开注册的人机验证配置；本地开发默认关闭。"""
+
+    model_config = SettingsConfigDict(
+        env_file=BACKEND_ENV_FILE,
+        env_file_encoding="utf-8",
+        env_prefix="TURNSTILE_",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    enabled: bool = False
+    secret_key: SecretStr | None = None
+    expected_hostname: str | None = None
+    expected_action: str = "register"
+
+    @field_validator("secret_key", "expected_hostname", mode="before")
+    @classmethod
+    def empty_optional_value(cls, value):
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def validate_enabled_configuration(self):
+        if self.enabled and (self.secret_key is None or self.expected_hostname is None):
+            raise ValueError(
+                "TURNSTILE_SECRET_KEY and TURNSTILE_EXPECTED_HOSTNAME are required when enabled"
+            )
+        if self.secret_key is not None and not self.secret_key.get_secret_value().strip():
+            raise ValueError("TURNSTILE_SECRET_KEY must not be blank")
+        if self.expected_hostname is not None and (
+            not self.expected_hostname.strip()
+            or self.expected_hostname != self.expected_hostname.strip()
+            or "://" in self.expected_hostname
+            or "/" in self.expected_hostname
+        ):
+            raise ValueError("TURNSTILE_EXPECTED_HOSTNAME must be a hostname without a scheme")
+        if not self.expected_action.strip() or self.expected_action != self.expected_action.strip():
+            raise ValueError("TURNSTILE_EXPECTED_ACTION must not be blank or padded")
+        return self
+
+
+def load_turnstile_settings() -> TurnstileSettings:
+    return TurnstileSettings.from_sources()
+
+
+class GenerationQuotaSettings(EnvironmentSettings):
+    """公开模型调用的持久化额度；一次聊天轮次最多包含两次模型请求。"""
+
+    model_config = SettingsConfigDict(
+        env_file=BACKEND_ENV_FILE,
+        env_file_encoding="utf-8",
+        env_prefix="GENERATION_",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    user_daily_limit: int = Field(default=30, ge=1, le=10000)
+    global_daily_limit: int = Field(default=500, ge=1, le=1000000)
+    global_concurrency_limit: int = Field(default=2, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def user_limit_cannot_exceed_global_limit(self):
+        if self.user_daily_limit > self.global_daily_limit:
+            raise ValueError("GENERATION_USER_DAILY_LIMIT cannot exceed the global daily limit")
+        return self
+
+
+def load_generation_quota_settings() -> GenerationQuotaSettings:
+    return GenerationQuotaSettings.from_sources()

@@ -26,6 +26,7 @@ router = APIRouter(
 
 @router.post("/auth/register", response_model=RegisterResponse, status_code=201)
 async def register(body: RegisterRequest, request: Request):
+    await request.app.state.turnstile_verifier.verify(body.turnstile_token, request.state.client_ip)
     factory = request.app.state.runtime.session_factory
     # 整段同步业务放到线程：密码哈希和 MySQL 不阻塞异步事件循环。
     return await complete_in_thread(lambda: register_user(body, factory))

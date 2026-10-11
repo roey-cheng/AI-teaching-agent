@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,7 +23,7 @@ from app.models import ChatSession, Message
 from app.services.errors import StartupCleanupError
 from app.services.generation_registry import GenerationRegistry
 from app.services.startup_cleanup import StartupCleanupResult, reconcile_interrupted_generations
-from testing_support import make_runtime
+from testing_support import TestDatabaseGuard, make_runtime
 
 
 class RuntimeLockTest(unittest.TestCase):
@@ -230,7 +230,11 @@ class RuntimeStartupTest(unittest.TestCase):
                 "app.core.runtime.reconcile_interrupted_generations",
                 side_effect=lambda *a, **k: (calls.append("cleaned"), StartupCleanupResult())[1],
             ),
-            open_backend_runtime(MagicMock(), lock=lock()) as runtime,
+            open_backend_runtime(
+                MagicMock(),
+                lock=lock(),
+                database_lock=nullcontext(TestDatabaseGuard()),
+            ) as runtime,
         ):
             calls.append("serving")
             assert isinstance(runtime.registry, GenerationRegistry)
@@ -245,7 +249,11 @@ class RuntimeStartupTest(unittest.TestCase):
                 ),
                 patch("app.core.runtime.reconcile_interrupted_generations") as cleanup,
                 self.assertRaises(StartupCleanupError),
-                open_backend_runtime(MagicMock(), lock=RuntimeLock(path)),
+                open_backend_runtime(
+                    MagicMock(),
+                    lock=RuntimeLock(path),
+                    database_lock=nullcontext(TestDatabaseGuard()),
+                ),
             ):
                 self.fail("Must not serve")
             cleanup.assert_not_called()

@@ -37,6 +37,11 @@ const zhErrorMessages: Record<string, string> = {
   INVALID_CREDENTIALS: '邮箱或密码不正确。',
   EMAIL_ALREADY_REGISTERED: '这个邮箱已经注册过了。',
   REGISTRATION_UNAVAILABLE: '暂时无法注册，请稍后再试。',
+  TURNSTILE_REQUIRED: '请先完成人机验证。',
+  TURNSTILE_FAILED: '人机验证失败或已过期，请重新验证。',
+  TURNSTILE_UNAVAILABLE: '人机验证服务暂时不可用，请稍后再试。',
+  TRUSTED_PROXY_REQUIRED: '请通过网站页面访问此服务。',
+  SERVICE_UNAVAILABLE: '服务暂时不可用，请稍后再试。',
   LOGIN_UNAVAILABLE: '暂时无法登录，请稍后再试。',
   AUTHENTICATION_UNAVAILABLE: '暂时无法检查登录状态，请稍后再试。',
   SESSION_BUSY: '这个对话仍在生成回答，请稍等。',
@@ -51,6 +56,9 @@ const zhErrorMessages: Record<string, string> = {
   GENERATION_INTERRUPTED: '回答生成被中断了，可以再试一次。',
   MODEL_REQUEST_FAILED: '模型暂时没有成功回答，请稍后再试。',
   GENERATION_FAILED: '回答生成失败了，可以再试一次。',
+  USER_DAILY_QUOTA_EXCEEDED: '你今天的聊天额度已经用完，请明天再试。',
+  GLOBAL_DAILY_QUOTA_EXCEEDED: '网站今天的总额度已经用完，请明天再试。',
+  GLOBAL_CONCURRENCY_LIMIT: '现在同时回复的人较多，请稍后再试。',
   INVALID_STREAM: '后端没有返回预期的聊天数据流。',
   HTTP_ERROR: '请求失败，请稍后重试。',
 }
@@ -61,6 +69,11 @@ const enErrorMessages: Record<string, string> = {
   INVALID_CREDENTIALS: 'The email or password is incorrect.',
   EMAIL_ALREADY_REGISTERED: 'An account already exists for this email.',
   REGISTRATION_UNAVAILABLE: 'Sign-up is temporarily unavailable. Please try again.',
+  TURNSTILE_REQUIRED: 'Complete the human verification first.',
+  TURNSTILE_FAILED: 'Human verification failed or expired. Please try again.',
+  TURNSTILE_UNAVAILABLE: 'Human verification is temporarily unavailable.',
+  TRUSTED_PROXY_REQUIRED: 'Access this service through the website.',
+  SERVICE_UNAVAILABLE: 'The service is temporarily unavailable.',
   LOGIN_UNAVAILABLE: 'Login is temporarily unavailable. Please try again.',
   AUTHENTICATION_UNAVAILABLE: 'Unable to check your session. Please try again.',
   SESSION_BUSY: 'This chat is still generating a response.',
@@ -75,6 +88,9 @@ const enErrorMessages: Record<string, string> = {
   GENERATION_INTERRUPTED: 'Response generation was interrupted. You can retry it.',
   MODEL_REQUEST_FAILED: 'The model could not answer right now. Please try again.',
   GENERATION_FAILED: 'Response generation failed. You can retry it.',
+  USER_DAILY_QUOTA_EXCEEDED: 'You have reached your daily chat limit. Try again tomorrow.',
+  GLOBAL_DAILY_QUOTA_EXCEEDED: "The site's daily chat limit has been reached.",
+  GLOBAL_CONCURRENCY_LIMIT: 'The site is busy. Please try again shortly.',
   INVALID_STREAM: 'The server did not return the expected chat stream.',
   HTTP_ERROR: 'The request failed. Please try again.',
 }
@@ -130,7 +146,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
 
 export const accountApi = {
   me: () => requestJson<User>('/api/v1/users/me'),
-  register: (input: { email: string; password: string; display_name: string }) =>
+  register: (input: { email: string; password: string; display_name: string; turnstile_token?: string }) =>
     requestJson<User>('/api/v1/auth/register', {
       method: 'POST',
       body: JSON.stringify(input),
