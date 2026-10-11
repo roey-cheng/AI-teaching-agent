@@ -20,6 +20,7 @@ from app.agent.profile_memory_tool import (
     MemoryCandidate,
     SaveMemoryInput,
     contains_sensitive_memory,
+    is_explicit_memory_request,
 )
 from app.schemas import MemoryListResponse
 from app.services.agent_input import InputMessage
@@ -68,6 +69,19 @@ class MemoryToolSchemaTest(unittest.TestCase):
                 self.assertTrue(contains_sensitive_memory(text))
         for text in ("我喜欢中文解释", "我会用 Git，也在学 Python", "我住在奥克兰"):
             self.assertFalse(contains_sensitive_memory(text))
+
+    def test_explicit_memory_request_detection_does_not_classify_recall_questions(self):
+        for text in (
+            "请保存我热爱学习",
+            "记住我不喜欢咖啡",
+            "把它存到我的 profile memory",
+            "Please remember that I prefer concise answers",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_explicit_memory_request(text))
+        for text in ("你还记得我喜欢什么吗", "我保存了一张照片", "What do you remember?"):
+            with self.subTest(text=text):
+                self.assertFalse(is_explicit_memory_request(text))
 
     def test_memory_growth_trims_whole_pairs_without_losing_current_question(self):
         original = prepared()
@@ -182,8 +196,15 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         messages, kwargs, model = self.calls[0]
         self.assertEqual(model.extra_body, {"thinking": {"type": "disabled"}})
         payload = model._get_request_payload(messages, **kwargs)
+        memory_input = json.loads(payload["messages"][-1]["content"])
         self.assertEqual(payload["extra_body"]["thinking"], {"type": "disabled"})
+        self.assertEqual(model.temperature, 0)
         self.assertEqual([message["role"] for message in payload["messages"]], ["system", "user"])
+        self.assertFalse(memory_input["explicit_memory_request"])
+        self.assertEqual(
+            memory_input["recent_user_messages"],
+            [{"position": "current", "content": self.question}],
+        )
         self.assertEqual(
             [item["function"]["name"] for item in kwargs["tools"]], ["save_profile_facts"]
         )
@@ -203,6 +224,81 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.save.assert_not_called()
         self.assertIn("No new memory save", updated.policy.system_prompt)
         self.assertEqual(self.stages[-1], "memory_skipped")
+
+    async def test_explicit_followup_can_resolve_previous_user_message(self):
+        previous = "我热爱学习"
+        current = "那你可以把它存到我的 profile memory 吗"
+        self.accepted = replace(
+            self.accepted,
+            prepared_input=replace(
+                self.accepted.prepared_input,
+                messages=(
+                    InputMessage("user", previous),
+                    InputMessage("assistant", "请明确告诉我是否保存"),
+                    InputMessage("user", current),
+                ),
+            ),
+        )
+        self.tools[0]["args"] = {
+            "facts": [
+                {
+                    "memory_key": "personal.interests",
+                    "summary": "热爱学习",
+                    "source_quote": previous,
+                }
+            ]
+        }
+        updated = await self.run_memory()
+        payload = self.calls[0][2]._get_request_payload(self.calls[0][0], **self.calls[0][1])
+        memory_input = json.loads(payload["messages"][-1]["content"])
+        self.assertTrue(memory_input["explicit_memory_request"])
+        self.assertEqual(
+            memory_input["recent_user_messages"],
+            [
+                {"position": "previous", "content": previous},
+                {"position": "current", "content": current},
+            ],
+        )
+        self.save.assert_called_once()
+        self.assertIn("confirmed saving", updated.policy.system_prompt)
+
+    async def test_previous_user_quote_is_rejected_without_explicit_followup(self):
+        previous = "我热爱学习"
+        self.accepted = replace(
+            self.accepted,
+            prepared_input=replace(
+                self.accepted.prepared_input,
+                messages=(
+                    InputMessage("user", previous),
+                    InputMessage("assistant", "很好"),
+                    InputMessage("user", "今天学什么"),
+                ),
+            ),
+        )
+        self.tools[0]["args"] = {
+            "facts": [
+                {
+                    "memory_key": "personal.interests",
+                    "summary": "热爱学习",
+                    "source_quote": previous,
+                }
+            ]
+        }
+        await self.run_memory()
+        self.save.assert_not_called()
+
+    async def test_explicit_request_without_tool_asks_for_clarification(self):
+        self.accepted = replace(
+            self.accepted,
+            prepared_input=replace(
+                self.accepted.prepared_input,
+                messages=(InputMessage("user", "请把它保存起来"),),
+            ),
+        )
+        self.tools, self.finish = [], "stop"
+        updated = await self.run_memory()
+        self.save.assert_not_called()
+        self.assertIn("ask the user to restate", updated.policy.system_prompt)
 
     async def test_sensitive_current_message_skips_memory_model_entirely(self):
         self.accepted = replace(

@@ -47,7 +47,8 @@ class ChatMemoryBudgetMiddleware(MemoryMiddleware):
                 "a separate backend memory stage may already have saved or updated the profile. "
                 "Only a backend-confirmed memory result in the system prompt can establish a new save. "
                 "If no new save was confirmed, this does not mean the existing profile is empty or that "
-                "the whole system has no memory feature. Do not tell the user that no memory tool exists."
+                "the whole system has no memory feature. Report only the backend-confirmed outcome. "
+                "Do not discuss internal tools, direct write permissions, settings, or implementation details."
             ),
         )
         self.policy = policy
