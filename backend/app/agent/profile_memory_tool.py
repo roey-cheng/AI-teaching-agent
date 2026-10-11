@@ -87,16 +87,23 @@ class BoundMemoryTool:
     """每次执行独立闭包；accepted/factory/registry 都不会出现在模型工具参数里。"""
 
     def __init__(self, accepted, factory, registry, progress: Callable[[str], Awaitable[None]]):
-        self.accepted, self.factory, self.registry, self.progress = accepted, factory, registry, progress
+        self.accepted, self.factory, self.registry, self.progress = (
+            accepted,
+            factory,
+            registry,
+            progress,
+        )
         self.active = True
         self.called = False
         self.status = "skipped"
         self.saved_topics: tuple[str, ...] = ()
         self.question = accepted.prepared_input.messages[-1].content
         self.tool = StructuredTool.from_function(
-            coroutine=self.save, name=TOOL_NAME,
+            coroutine=self.save,
+            name=TOOL_NAME,
             description="Save eligible long-term user facts supported by exact quotes from the current message. Submit complete merged summaries, not fragments.",
-            args_schema=SaveMemoryInput, return_direct=True,
+            args_schema=SaveMemoryInput,
+            return_direct=True,
             handle_validation_error="Memory was not saved: invalid arguments.",
         )
 
@@ -104,30 +111,32 @@ class BoundMemoryTool:
         self.active = False
 
     async def save(self, facts: list[MemoryCandidate]) -> str:
-        if not self.active or asyncio.current_task().cancelling():
+        tool_task = asyncio.current_task()
+        if tool_task is None or not self.active or tool_task.cancelling():
             raise asyncio.CancelledError
         if self.called:
             return "Memory was not saved: only one write batch is allowed."
         self.called = True
         checked = SaveMemoryInput(facts=facts).facts
-        if (contains_sensitive_memory(self.question)
-                or any(fact.source_quote not in self.question
-                       or contains_sensitive_memory(fact.source_quote + "\n" + fact.summary)
-                       for fact in checked)):
+        if contains_sensitive_memory(self.question) or any(
+            fact.source_quote not in self.question
+            or contains_sensitive_memory(fact.source_quote + "\n" + fact.summary)
+            for fact in checked
+        ):
             self.status = "rejected"
             return "Memory was not saved: facts failed the source or privacy checks."
         await self.progress("memory_saving")
-        if not self.active or asyncio.current_task().cancelling():
+        if not self.active or tool_task.cancelling():
             raise asyncio.CancelledError
-
-        tool_task = asyncio.current_task()
 
         def persist():
             if not self.active or tool_task.cancelling():
                 raise StaleGenerationError()
             result = save_profile_facts(
-                self.accepted, [ProfileFact(memory_key=fact.memory_key, summary=fact.summary) for fact in checked],
-                self.factory, self.registry,
+                self.accepted,
+                [ProfileFact(memory_key=fact.memory_key, summary=fact.summary) for fact in checked],
+                self.factory,
+                self.registry,
             )
             # 在线程里记录确认结果，即使等待者此时被取消，也不会误报未写入。
             self.status = "saved"

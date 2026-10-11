@@ -26,7 +26,10 @@ class ProfileFact(BaseModel):
     """
 
     model_config = ConfigDict(
-        extra="forbid", strict=True, frozen=True, revalidate_instances="always",
+        extra="forbid",
+        strict=True,
+        frozen=True,
+        revalidate_instances="always",
         hide_input_in_errors=True,
     )
 
@@ -53,23 +56,32 @@ _facts_adapter = TypeAdapter(Annotated[list[ProfileFact], Field(min_length=1, ma
 
 
 def list_profile_memory(
-    current_user: UserResponse, session_factory: sessionmaker[Session],
+    current_user: UserResponse,
+    session_factory: sessionmaker[Session],
 ) -> MemoryListResponse:
     """先由调用方认证；只读本人记忆，按更新时间/编号倒序返回公开字段。"""
     try:
         with session_factory() as session:
-            rows = session.scalars(select(AgentMemory).where(
-                AgentMemory.user_id == int(current_user.user_id),
-            ).order_by(AgentMemory.updated_at.desc(), AgentMemory.memory_id.desc())).all()
-            return MemoryListResponse(items=[MemoryResponse.model_validate(row) for row in rows])
-    except (SQLAlchemyError, ValidationError):
+            rows = session.scalars(
+                select(AgentMemory)
+                .where(
+                    AgentMemory.user_id == int(current_user.user_id),
+                )
+                .order_by(AgentMemory.updated_at.desc(), AgentMemory.memory_id.desc())
+            ).all()
+            return MemoryListResponse.model_validate(
+                {"items": [MemoryResponse.model_validate(row) for row in rows]}
+            )
+    except SQLAlchemyError, ValidationError:
         # 数据库不可用不能伪装成空列表，也不输出 SQL/凭据/原始记忆。
         raise MemoryUnavailableError() from None
 
 
 def save_profile_facts(
-    accepted: AcceptedMessage, facts: list[ProfileFact],
-    session_factory: sessionmaker[Session], registry: GenerationRegistry,
+    accepted: AcceptedMessage,
+    facts: list[ProfileFact],
+    session_factory: sessionmaker[Session],
+    registry: GenerationRegistry,
 ) -> MemoryListResponse:
     """在有效生成的作用域内保存审核后的摘要；只返回本次涉及的记忆。
 
@@ -93,37 +105,66 @@ def save_profile_facts(
                 raise StaleGenerationError()
             with session_factory.begin() as session:
                 _owned_chat(session, chat_id, user_id)
-                question = session.scalar(select(Message).where(
-                    Message.message_id == int(accepted.user_message_id),
-                    Message.chat_session_id == chat_id,
-                ).with_for_update())
-                if (question is None or question.role != "USER"
-                        or question.attempt_id != accepted.attempt_id
-                        or question.generation_status != "RUNNING"):
+                question = session.scalar(
+                    select(Message)
+                    .where(
+                        Message.message_id == int(accepted.user_message_id),
+                        Message.chat_session_id == chat_id,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    question is None
+                    or question.role != "USER"
+                    or question.attempt_id != accepted.attempt_id
+                    or question.generation_status != "RUNNING"
+                ):
                     raise StaleGenerationError()
-                if session.scalar(select(Message.message_id).where(
-                    Message.in_reply_to_message_id == question.message_id,
-                )) is not None:
+                if (
+                    session.scalar(
+                        select(Message.message_id).where(
+                            Message.in_reply_to_message_id == question.message_id,
+                        )
+                    )
+                    is not None
+                ):
                     raise StaleGenerationError()
                 now = datetime.now(UTC).replace(tzinfo=None)
                 # 固定顺序减少多个会话同时写多主题时的死锁机会；仍不自动重试故障。
-                statement = insert(AgentMemory).values([
-                    dict(user_id=user_id, memory_key=fact.memory_key,
-                         memory_type=MEMORY_TOPIC_TYPES[fact.memory_key], summary=fact.summary,
-                         created_at=now, updated_at=now)
-                    for fact in sorted(checked, key=lambda item: item.memory_key)
-                ])
+                statement = insert(AgentMemory).values(
+                    [
+                        {
+                            "user_id": user_id,
+                            "memory_key": fact.memory_key,
+                            "memory_type": MEMORY_TOPIC_TYPES[fact.memory_key],
+                            "summary": fact.summary,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                        for fact in sorted(checked, key=lambda item: item.memory_key)
+                    ]
+                )
                 # 唯一键 (user_id, memory_key) 决定新增还是更新；不覆盖未涉及的主题。
                 # 不改 memory_id/created_at，不累计证据。同主题并发采用提交顺序后写生效。
-                session.execute(statement.on_duplicate_key_update(
-                    summary=statement.inserted.summary, updated_at=statement.inserted.updated_at,
-                ))
-                rows = session.scalars(select(AgentMemory).where(
-                    AgentMemory.user_id == user_id, AgentMemory.memory_key.in_(keys),
-                ).order_by(AgentMemory.updated_at.desc(), AgentMemory.memory_id.desc())).all()
-                result = MemoryListResponse(items=[MemoryResponse.model_validate(row) for row in rows])
+                session.execute(
+                    statement.on_duplicate_key_update(
+                        summary=statement.inserted.summary,
+                        updated_at=statement.inserted.updated_at,
+                    )
+                )
+                rows = session.scalars(
+                    select(AgentMemory)
+                    .where(
+                        AgentMemory.user_id == user_id,
+                        AgentMemory.memory_key.in_(keys),
+                    )
+                    .order_by(AgentMemory.updated_at.desc(), AgentMemory.memory_id.desc())
+                ).all()
+                result = MemoryListResponse.model_validate(
+                    {"items": [MemoryResponse.model_validate(row) for row in rows]}
+                )
             # begin 正常退出、COMMIT 得到确认后才返回成功；不释放生成占用。
             return result
-    except (SQLAlchemyError, ValidationError):
+    except SQLAlchemyError, ValidationError:
         # 提交断线可能已落库；不声称一定回滚、不盲目自动重试、不返回“已保存”。
         raise MemoryUnavailableError() from None

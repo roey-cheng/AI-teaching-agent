@@ -12,13 +12,16 @@ class Message(Base):
 
     __tablename__ = "messages"
     __table_args__ = (
-        UniqueConstraint("chat_session_id", "client_message_key", name="uq_messages_session_client_key"),
+        UniqueConstraint(
+            "chat_session_id", "client_message_key", name="uq_messages_session_client_key"
+        ),
         UniqueConstraint("in_reply_to_message_id", name="uq_messages_reply"),
         UniqueConstraint("attempt_id", name="uq_messages_attempt"),
         CheckConstraint("role IN ('USER', 'ASSISTANT')", name="ck_messages_role"),
         CheckConstraint("CHAR_LENGTH(content) > 0", name="ck_messages_content_not_empty"),
         CheckConstraint(
-            "role <> 'USER' OR CHAR_LENGTH(content) <= 20000", name="ck_messages_user_content_length"
+            "role <> 'USER' OR CHAR_LENGTH(content) <= 20000",
+            name="ck_messages_user_content_length",
         ),
         # 两个角色共用一张表，因此一些列允许 NULL，再按角色检查哪些必须有值。
         # 必须显式写 IS NOT NULL：SQL 的 CHECK 对 UNKNOWN 也可能放行。
@@ -66,8 +69,10 @@ class Message(Base):
     chat_session_id: Mapped[int] = mapped_column(
         BIGINT(unsigned=True),
         ForeignKey(
-            "chat_sessions.chat_session_id", name="fk_messages_chat_session",
-            ondelete="RESTRICT", onupdate="RESTRICT",
+            "chat_sessions.chat_session_id",
+            name="fk_messages_chat_session",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         nullable=False,
     )
@@ -80,8 +85,10 @@ class Message(Base):
     in_reply_to_message_id: Mapped[int | None] = mapped_column(
         BIGINT(unsigned=True),
         ForeignKey(
-            "messages.message_id", name="fk_messages_reply",
-            ondelete="RESTRICT", onupdate="RESTRICT",
+            "messages.message_id",
+            name="fk_messages_reply",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
         ),
         nullable=True,
     )

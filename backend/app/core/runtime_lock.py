@@ -1,15 +1,17 @@
 """同一项目目录的单主机进程锁；一直持有到服务/终端退出，不是分布式租约。"""
 
 import os
-from pathlib import Path
 import stat
+from pathlib import Path
 
 DEFAULT_LOCK_PATH = Path(__file__).resolve().parents[2] / ".runtime" / "chat.lock"
 
 
 class RuntimeAlreadyActiveError(Exception):
     def __init__(self):
-        super().__init__("Another chat process is using this project. Stop it before starting this one.")
+        super().__init__(
+            "Another chat process is using this project. Stop it before starting this one."
+        )
 
 
 class RuntimeLockError(Exception):

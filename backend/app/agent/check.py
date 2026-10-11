@@ -2,9 +2,10 @@
 
 import asyncio
 from contextlib import aclosing
+from typing import Any
 
 from deepagents import create_deep_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, wrap_model_call
+from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware, wrap_model_call
 from langchain_core.messages import AIMessageChunk
 from langchain_deepseek import ChatDeepSeek
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError
@@ -29,7 +30,7 @@ def build_probe_agent(settings: ModelSettings):
     model = ChatDeepSeek(
         model=settings.name,
         api_key=settings.api_key,
-        api_base=settings.base_url,
+        base_url=settings.base_url,
         max_tokens=128,
         timeout=30,
         max_retries=0,
@@ -38,10 +39,14 @@ def build_probe_agent(settings: ModelSettings):
     )
     # 真正使用 Deep Agents 构建执行流程，而不是直接 model.invoke()。
     # 默认工作区只在内存里，不挂载项目文件，也不接数据库或长期记忆。
+    middleware: list[AgentMiddleware[Any, None]] = [
+        probe_without_tools,
+        ModelCallLimitMiddleware(run_limit=1),
+    ]
     return create_deep_agent(
         model=model,
         system_prompt="你是教学助手。直接简短回答用户问题，不要调用工具。",
-        middleware=[probe_without_tools, ModelCallLimitMiddleware(run_limit=1)],
+        middleware=middleware,
         checkpointer=None,
     )
 
@@ -65,12 +70,14 @@ async def stream_answer(agent) -> int:
     count = 0
     finish_reason = None
     # astream 像不断收到小纸条；每来一段文字就打印一段，不等全部生成完。
-    async with aclosing(agent.astream(
-        {"messages": [{"role": "user", "content": QUESTION}]},
-        config={"recursion_limit": 8},
-        stream_mode="messages",
-        subgraphs=False,
-    )) as stream:
+    async with aclosing(
+        agent.astream(
+            {"messages": [{"role": "user", "content": QUESTION}]},
+            config={"recursion_limit": 8},
+            stream_mode="messages",
+            subgraphs=False,
+        )
+    ) as stream:
         async for chunk, metadata in stream:
             if isinstance(chunk, AIMessageChunk) and metadata.get("langgraph_node") == "model":
                 finish_reason = chunk.response_metadata.get("finish_reason", finish_reason)
@@ -87,8 +94,10 @@ async def main() -> int:
     try:
         settings = load_model_settings()
         tracing_settings = load_tracing_settings()
-    except (ValidationError, SettingsError, OSError):
-        print("Invalid model or tracing configuration: check MODEL_* and LANGSMITH_* in backend/.env. Do not share API keys.")
+    except ValidationError, SettingsError, OSError:
+        print(
+            "Invalid model or tracing configuration: check MODEL_* and LANGSMITH_* in backend/.env. Do not share API keys."
+        )
         return 1
 
     print("Starting the minimal Deep Agents check (one model call; no database reads or writes).")
@@ -102,25 +111,37 @@ async def main() -> int:
     except AuthenticationError:
         print("\nAuthentication failed: check your API key; do not share it in chat.")
         return 1
-    except (APITimeoutError, TimeoutError):
+    except APITimeoutError, TimeoutError:
         print("\nRequest timed out: the check did not complete; no automatic retry.")
         return 1
     except APIConnectionError:
         print("\nNetwork connection failed: check your network and proxy; no automatic retry.")
         return 1
     except APIStatusError as error:
-        print(f"\nModel service returned HTTP {error.status_code}: check the model name, account balance, or rate limits.")
+        print(
+            f"\nModel service returned HTTP {error.status_code}: check the model name, account balance, or rate limits."
+        )
         return 1
-    except Exception:
+    except Exception:  # noqa: BLE001 -- CLI 最外层统一脱敏，不让未知供应商异常泄露凭据。
         # 不打印原始异常、请求对象或设置，避免意外泄露密钥。
-        print("\nCheck incomplete: model output was incomplete or the Agent failed; no automatic retry.")
+        print(
+            "\nCheck incomplete: model output was incomplete or the Agent failed; no automatic retry."
+        )
         return 1
-    print(f"\nCheck successful: received {count} non-empty text chunks; the model finished normally.")
+    print(
+        f"\nCheck successful: received {count} non-empty text chunks; the model finished normally."
+    )
     if count < 2:
-        print("Only one text chunk was received; multiple incremental chunks have not yet been observed.")
-    print("This is a terminal-only test; web chat, SSE endpoints, and long-term memory are not integrated yet.")
+        print(
+            "Only one text chunk was received; multiple incremental chunks have not yet been observed."
+        )
+    print(
+        "This is a terminal-only test; web chat, SSE endpoints, and long-term memory are not integrated yet."
+    )
     if tracing_settings.tracing:
-        print("LangSmith tracing was enabled. Check the configured LangSmith project; upload success is not verified here.")
+        print(
+            "LangSmith tracing was enabled. Check the configured LangSmith project; upload success is not verified here."
+        )
     return 0
 
 

@@ -18,12 +18,8 @@ class User(Base):
     __table_args__ = (
         UniqueConstraint("email", name="uq_users_email"),
         CheckConstraint("CHAR_LENGTH(email) > 0", name="ck_users_email_not_empty"),
-        CheckConstraint(
-            "CHAR_LENGTH(password_hash) > 0", name="ck_users_password_hash_not_empty"
-        ),
-        CheckConstraint(
-            "CHAR_LENGTH(display_name) > 0", name="ck_users_display_name_not_empty"
-        ),
+        CheckConstraint("CHAR_LENGTH(password_hash) > 0", name="ck_users_password_hash_not_empty"),
+        CheckConstraint("CHAR_LENGTH(display_name) > 0", name="ck_users_display_name_not_empty"),
         CheckConstraint("status IN ('ACTIVE', 'DISABLED')", name="ck_users_status"),
         CheckConstraint("system_role IN ('USER', 'ADMIN')", name="ck_users_system_role"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4"},

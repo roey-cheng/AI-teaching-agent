@@ -13,8 +13,10 @@ def main() -> int:
     try:
         # 复用现有 DB_* 配置，不再要求填写一套账号密码。
         settings = load_database_settings()
-    except (ValidationError, SettingsError, OSError):
-        print("Invalid database configuration: check DB_* in backend/.env; configuration values are not displayed.")
+    except ValidationError, SettingsError, OSError:
+        print(
+            "Invalid database configuration: check DB_* in backend/.env; configuration values are not displayed."
+        )
         return 1
 
     try:
@@ -27,16 +29,20 @@ def main() -> int:
         finally:
             # 此命令只检查一次；结束时释放连接池里的连接，包括失败时的清理。
             engine.dispose()
-    except (SQLAlchemyError, OSError):
+    except SQLAlchemyError, OSError:
         # 不输出原始异常，以免数据库地址、账号或敏感参数出现在终端。
-        print("SQLAlchemy connection or query failed: check the MySQL service, network, and DB_* configuration.")
+        print(
+            "SQLAlchemy connection or query failed: check the MySQL service, network, and DB_* configuration."
+        )
         return 1
 
     if result != 1:
         print("SQLAlchemy check failed: SELECT 1 did not return the expected value of 1.")
         return 1
 
-    print("SQLAlchemy connection successful: SELECT 1 returned 1 via PyMySQL; connections released.")
+    print(
+        "SQLAlchemy connection successful: SELECT 1 returned 1 via PyMySQL; connections released."
+    )
     return 0
 
 

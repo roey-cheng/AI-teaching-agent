@@ -1,12 +1,13 @@
 """失败重试的准入/执行接线；不连接数据库，不访问模型或 LangSmith。"""
 
+import unittest
 from contextlib import contextmanager
 from datetime import datetime
-import unittest
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
+from test_chat_agent_factory import prepared, settings
 
 from app.agent.input_policy import policy_for_model
 from app.core.config import TracingSettings
@@ -14,33 +15,48 @@ from app.models import ChatSession, Message
 from app.schemas import DuplicateMessageResponse, RetryMessageRequest, UserResponse
 from app.services.chat_execution import execute_chat_retry
 from app.services.errors import (
-    ContextTooLargeError, MessageNotFoundError, MessageSendUnavailableError,
-    RetryNotAllowedError, SessionBusyError, SessionNotFoundError, StaleAttemptError,
+    ContextTooLargeError,
+    MessageNotFoundError,
+    MessageSendUnavailableError,
+    RetryNotAllowedError,
+    SessionBusyError,
+    SessionNotFoundError,
+    StaleAttemptError,
 )
 from app.services.generation_registry import GenerationRegistry
 from app.services.message_retry import accept_failed_message_retry
 from app.services.message_submission import AcceptedMessage
-from test_chat_agent_factory import prepared, settings
+from testing_support import require_value
 
 
 class MessageRetryTest(unittest.TestCase):
     def setUp(self):
-        self.user = UserResponse(user_id="123", email="a@example.com", display_name="A")
-        self.request = RetryMessageRequest(failed_attempt_id=str(uuid4()))
+        self.user = UserResponse.model_validate(
+            {"user_id": "123", "email": "a@example.com", "display_name": "A"}
+        )
+        self.request = RetryMessageRequest.model_validate({"failed_attempt_id": str(uuid4())})
         self.factory = MagicMock()
         self.writer = self.factory.begin.return_value.__enter__.return_value
         self.chat = ChatSession(chat_session_id=10, user_id=123, title="Keep title")
         self.question = Message(
-            message_id=20, chat_session_id=10, role="USER", content="  Original\nquestion  ",
-            client_message_key=str(uuid4()), attempt_id=self.request.failed_attempt_id,
-            generation_status="FAILED", generation_error_code="MODEL_REQUEST_FAILED",
-            generation_error_message="Safe failure", created_at=datetime(2026, 10, 11),
+            message_id=20,
+            chat_session_id=10,
+            role="USER",
+            content="  Original\nquestion  ",
+            client_message_key=str(uuid4()),
+            attempt_id=self.request.failed_attempt_id,
+            generation_status="FAILED",
+            generation_error_code="MODEL_REQUEST_FAILED",
+            generation_error_message="Safe failure",
+            created_at=datetime(2026, 10, 11),
         )
         # owner, target, answer, orphan RUNNING, latest USER
         self.writer.scalar.side_effect = [self.chat, self.question, None, None, 20]
         self.registry, self.check = GenerationRegistry(), MagicMock()
         self.policy = policy_for_model("deepseek-v4-pro")
-        prepare_patch = patch("app.services.message_retry.prepare_agent_input", return_value=prepared())
+        prepare_patch = patch(
+            "app.services.message_retry.prepare_agent_input", return_value=prepared()
+        )
         self.prepare = prepare_patch.start()
         self.addCleanup(prepare_patch.stop)
         cleanup_patch = patch("app.services.message_retry._settle_interrupted")
@@ -49,21 +65,29 @@ class MessageRetryTest(unittest.TestCase):
 
     def accept(self):
         return accept_failed_message_retry(
-            self.user, "10", "20", self.request, self.factory, self.registry,
-            check_retry=self.check, input_policy=self.policy,
+            self.user,
+            "10",
+            "20",
+            self.request,
+            self.factory,
+            self.registry,
+            check_retry=self.check,
+            input_policy=self.policy,
         )
 
     def test_updates_original_only_and_commits_before_yield(self):
         old_time, old_key = self.question.created_at, self.question.client_message_key
         with self.accept() as result:
-            self.assertIsInstance(result, AcceptedMessage)
+            assert isinstance(result, AcceptedMessage)
             self.assertEqual(result.user_message_id, "20")
             self.assertNotEqual(result.attempt_id, self.request.failed_attempt_id)
             self.assertEqual(self.question.retry_of_attempt_id, self.request.failed_attempt_id)
             self.assertEqual(self.question.generation_status, "RUNNING")
             self.assertIsNone(self.question.generation_error_code)
             self.assertIsNone(self.question.generation_error_message)
-            self.assertEqual((self.question.created_at, self.question.client_message_key), (old_time, old_key))
+            self.assertEqual(
+                (self.question.created_at, self.question.client_message_key), (old_time, old_key)
+            )
             self.assertEqual(self.chat.title, "Keep title")
             self.assertEqual(self.chat.last_activity_at, self.question.updated_at)
             self.writer.add.assert_not_called()
@@ -72,7 +96,9 @@ class MessageRetryTest(unittest.TestCase):
             self.assertEqual(self.prepare.call_args.kwargs["retry_message_id"], "20")
             self.assertEqual(self.prepare.call_args.args[3].content, self.question.content)
         self.cleanup.assert_called_once()
-        self.assertEqual(self.cleanup.call_args.kwargs["previous_attempt_id"], self.request.failed_attempt_id)
+        self.assertEqual(
+            self.cleanup.call_args.kwargs["previous_attempt_id"], self.request.failed_attempt_id
+        )
         self.check.assert_called_once()
 
     def test_owner_is_checked_before_message(self):
@@ -99,9 +125,9 @@ class MessageRetryTest(unittest.TestCase):
         self.question.attempt_id = str(uuid4())
         self.question.generation_status = "RUNNING"
         with self.registry.locked(10) as slot:
-            slot.claim(self.question.attempt_id)
+            slot.claim(require_value(self.question.attempt_id))
         with self.accept() as receipt:
-            self.assertIsInstance(receipt, DuplicateMessageResponse)
+            assert isinstance(receipt, DuplicateMessageResponse)
             self.assertEqual(receipt.attempt_id, self.question.attempt_id)
         self.prepare.assert_not_called()
         self.check.assert_not_called()
@@ -166,9 +192,15 @@ class MessageRetryTest(unittest.TestCase):
 
 class RetryExecutionTest(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_retry_does_not_create_model_or_emit_events(self):
-        receipt = DuplicateMessageResponse(
-            duplicate=True, session_id="1", user_message_id="10", attempt_id=str(uuid4()),
-            status="FAILED", assistant_message_id=None,
+        receipt = DuplicateMessageResponse.model_validate(
+            {
+                "duplicate": True,
+                "session_id": "1",
+                "user_message_id": "10",
+                "attempt_id": str(uuid4()),
+                "status": "FAILED",
+                "assistant_message_id": None,
+            }
         )
         exited = []
 
@@ -179,16 +211,31 @@ class RetryExecutionTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 exited.append(True)
 
-        with patch("app.services.chat_execution.accept_failed_message_retry", side_effect=accept) as admission, \
-                patch("app.services.chat_execution.build_chat_agent") as model, \
-                patch("app.services.chat_execution.prepare_memory_for_turn") as memory:
+        with (
+            patch(
+                "app.services.chat_execution.accept_failed_message_retry", side_effect=accept
+            ) as admission,
+            patch("app.services.chat_execution.build_chat_agent") as model,
+            patch("app.services.chat_execution.prepare_memory_for_turn") as memory,
+        ):
             callback = MagicMock()
-            request = RetryMessageRequest(failed_attempt_id=str(uuid4()))
+            request = RetryMessageRequest.model_validate({"failed_attempt_id": str(uuid4())})
             result = await execute_chat_retry(
-                UserResponse(user_id="1", email="a@example.com", display_name="A"), "1", "10", request,
-                MagicMock(), GenerationRegistry(), model_settings=settings(),
-                tracing_settings=TracingSettings(_env_file=None, tracing=False, api_key=None),
-                input_policy=prepared().policy, check_retry=MagicMock(), on_event=callback,
+                UserResponse.model_validate(
+                    {"user_id": "1", "email": "a@example.com", "display_name": "A"}
+                ),
+                "1",
+                "10",
+                request,
+                MagicMock(),
+                GenerationRegistry(),
+                model_settings=settings(),
+                tracing_settings=TracingSettings.from_sources(
+                    _env_file=None, tracing=False, api_key=None
+                ),
+                input_policy=prepared().policy,
+                check_retry=MagicMock(),
+                on_event=callback,
             )
         self.assertIs(result, receipt)
         self.assertEqual(exited, [True])

@@ -1,10 +1,10 @@
 """HTTP 来源与输入边界检查、账号单进程限流；不承担密码验证。"""
 
+import math
+import time
 from collections import deque
 from hashlib import sha256
-import math
 from threading import Lock
-import time
 
 from fastapi import Request
 from fastapi.routing import APIRoute
@@ -43,8 +43,12 @@ class AccountRateLimiter:
 
     @staticmethod
     def reject(seconds):
-        raise APIError(429, "RATE_LIMITED", "Too many requests. Please try again later.",
-                       headers={"Retry-After": str(seconds)})
+        raise APIError(
+            429,
+            "RATE_LIMITED",
+            "Too many requests. Please try again later.",
+            headers={"Retry-After": str(seconds)},
+        )
 
 
 def cookie_token(request: Request) -> SecretStr | None:
@@ -64,7 +68,10 @@ def reject_query_parameters(request: Request) -> None:
 
 
 def require_json(request: Request) -> None:
-    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "application/json"
+    ):
         raise APIError(415, "UNSUPPORTED_MEDIA_TYPE", "Use application/json.")
 
 
@@ -75,7 +82,9 @@ async def read_small_body(request: Request, *, allow_body: bool, max_bytes: int 
     async for chunk in request.stream():
         size += len(chunk)
         if size > max_bytes:
-            raise APIError(413, "REQUEST_TOO_LARGE", "Request body exceeds the endpoint size limit.")
+            raise APIError(
+                413, "REQUEST_TOO_LARGE", "Request body exceeds the endpoint size limit."
+            )
         chunks.append(chunk)
     body = b"".join(chunks)
     if not allow_body and body:
@@ -98,7 +107,9 @@ class AccountRoute(APIRoute):
             if request.method == "POST" and name in {"login", "register"}:
                 # 不直接信任 X-Forwarded-For；反向代理信任范围需由部署配置限制。
                 ip = request.client.host if request.client else "unknown"
-                request.app.state.account_limiter.consume(name + "_ip", ip, 60 if name == "login" else 3600)
+                request.app.state.account_limiter.consume(
+                    name + "_ip", ip, 60 if name == "login" else 3600
+                )
                 require_json(request)
             await read_small_body(request, allow_body=name not in {"logout", "me"})
             return await original(request)

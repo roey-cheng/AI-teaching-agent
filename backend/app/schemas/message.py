@@ -61,12 +61,16 @@ class GenerationResponse(_MessageOutput):
         # model_validator 同时检查多个字段，避免“成功却没有答案编号”等矛盾。
         if self.status == "SUCCEEDED":
             if self.assistant_message_id is None or self.error is not None or self.can_retry:
-                raise ValueError("Successful generation requires an answer ID, no error, and can_retry=false")
+                raise ValueError(
+                    "Successful generation requires an answer ID, no error, and can_retry=false"
+                )
         elif self.status == "FAILED":
             if self.assistant_message_id is not None or self.error is None:
                 raise ValueError("Failed generation requires an error and no answer ID")
         elif self.assistant_message_id is not None or self.error is not None or self.can_retry:
-            raise ValueError("Running generation must have no answer ID or error, and can_retry=false")
+            raise ValueError(
+                "Running generation must have no answer ID or error, and can_retry=false"
+            )
         return self
 
 
@@ -129,13 +133,23 @@ class MessageHistoryResponse(_MessageOutput):
             if user.generation.status == "SUCCEEDED":
                 answer_id = user.generation.assistant_message_id
                 answer = by_id.get(answer_id) if answer_id is not None else None
-                if not isinstance(answer, AssistantMessageResponse) or answer.in_reply_to_message_id != user.message_id:
-                    raise ValueError("Successful generation must reference its saved assistant message")
+                if (
+                    not isinstance(answer, AssistantMessageResponse)
+                    or answer.in_reply_to_message_id != user.message_id
+                ):
+                    raise ValueError(
+                        "Successful generation must reference its saved assistant message"
+                    )
         for item in self.items:
             if isinstance(item, AssistantMessageResponse):
                 question = by_id.get(item.in_reply_to_message_id)
-                if not isinstance(question, UserMessageResponse) or question.generation.assistant_message_id != item.message_id:
-                    raise ValueError("Assistant message must match a successful question in this history")
+                if (
+                    not isinstance(question, UserMessageResponse)
+                    or question.generation.assistant_message_id != item.message_id
+                ):
+                    raise ValueError(
+                        "Assistant message must match a successful question in this history"
+                    )
         # 清理过程中可能已写 FAILED 但仍占用会话，所以允许 busy=true 且没有 RUNNING。
         return self
 

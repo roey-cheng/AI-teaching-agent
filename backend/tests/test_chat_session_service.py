@@ -1,7 +1,7 @@
 """会话管理业务离线测试；不连接数据库，不调用模型。"""
 
-from datetime import UTC, datetime
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
@@ -15,7 +15,9 @@ from app.services.errors import SessionNotFoundError, SessionUnavailableError
 
 class CreateChatSessionTest(unittest.TestCase):
     def setUp(self):
-        self.user = UserResponse(user_id="123", email="student@example.com", display_name="学生")
+        self.user = UserResponse.model_validate(
+            {"user_id": "123", "email": "student@example.com", "display_name": "学生"}
+        )
         self.factory = MagicMock()
         self.writer = self.factory.begin.return_value.__enter__.return_value
         self.writer.flush.side_effect = self.assign_id
@@ -29,20 +31,34 @@ class CreateChatSessionTest(unittest.TestCase):
             clock.now.return_value = now
             result = create_chat_session(self.user, self.factory)
         chat = self.writer.add.call_args.args[0]
-        self.assertIsInstance(chat, ChatSession)
-        self.assertEqual((chat.user_id, chat.title, chat.title_is_manual), (123, "new chat session", False))
+        assert isinstance(chat, ChatSession)
+        self.assertEqual(
+            (chat.user_id, chat.title, chat.title_is_manual), (123, "new chat session", False)
+        )
         for name in ("created_at", "updated_at", "last_activity_at"):
             self.assertEqual(getattr(chat, name), now.replace(tzinfo=None))
-        self.assertEqual(result.model_dump(), {
-            "session_id": "1001", "title": "new chat session", "created_at": now,
-            "updated_at": now, "last_activity_at": now,
-        })
+        self.assertEqual(
+            result.model_dump(),
+            {
+                "session_id": "1001",
+                "title": "new chat session",
+                "created_at": now,
+                "updated_at": now,
+                "last_activity_at": now,
+            },
+        )
         self.writer.add.assert_called_once()
         self.writer.flush.assert_called_once()
         self.factory.begin.return_value.__exit__.assert_called_once_with(None, None, None)
 
     def test_owner_is_taken_from_authenticated_user_including_large_id(self):
-        user = UserResponse(user_id="18446744073709551615", email="other@example.com", display_name="Other")
+        user = UserResponse.model_validate(
+            {
+                "user_id": "18446744073709551615",
+                "email": "other@example.com",
+                "display_name": "Other",
+            }
+        )
         create_chat_session(user, self.factory)
         self.assertEqual(self.writer.add.call_args.args[0].user_id, 18446744073709551615)
 
@@ -81,13 +97,22 @@ class CreateChatSessionTest(unittest.TestCase):
 
 class RenameChatSessionTest(unittest.TestCase):
     def setUp(self):
-        self.user = UserResponse(user_id="123", email="student@example.com", display_name="学生")
-        self.request = RenameSessionRequest(title="  Python 学习  ")
+        self.user = UserResponse.model_validate(
+            {"user_id": "123", "email": "student@example.com", "display_name": "学生"}
+        )
+        self.request = RenameSessionRequest.model_validate({"title": "  Python 学习  "})
         self.factory = MagicMock()
         self.writer = self.factory.begin.return_value.__enter__.return_value
         self.old_time = datetime(2026, 9, 24)
-        self.chat = ChatSession(chat_session_id=1001, user_id=123, title="Original", title_is_manual=False,
-                                created_at=self.old_time, updated_at=self.old_time, last_activity_at=self.old_time)
+        self.chat = ChatSession(
+            chat_session_id=1001,
+            user_id=123,
+            title="Original",
+            title_is_manual=False,
+            created_at=self.old_time,
+            updated_at=self.old_time,
+            last_activity_at=self.old_time,
+        )
         self.writer.scalar.return_value = self.chat
 
     def test_rename_changes_only_title_manual_flag_and_update_time(self):
@@ -98,9 +123,14 @@ class RenameChatSessionTest(unittest.TestCase):
         self.assertEqual(result.title, "Python 学习")
         self.assertTrue(self.chat.title_is_manual)
         self.assertEqual(result.updated_at, now)
-        self.assertEqual((self.chat.user_id, self.chat.created_at, self.chat.last_activity_at),
-                         (123, self.old_time, self.old_time))
-        self.assertEqual(set(result.model_dump()), {"session_id", "title", "created_at", "updated_at", "last_activity_at"})
+        self.assertEqual(
+            (self.chat.user_id, self.chat.created_at, self.chat.last_activity_at),
+            (123, self.old_time, self.old_time),
+        )
+        self.assertEqual(
+            set(result.model_dump()),
+            {"session_id", "title", "created_at", "updated_at", "last_activity_at"},
+        )
         self.writer.flush.assert_called_once()
         self.factory.begin.return_value.__exit__.assert_called_once_with(None, None, None)
 
@@ -112,20 +142,33 @@ class RenameChatSessionTest(unittest.TestCase):
         self.assertNotIn("messages", str(query))
 
     def test_same_title_still_marks_manual(self):
-        rename_chat_session(self.user, "1001", RenameSessionRequest(title="Original"), self.factory)
+        rename_chat_session(
+            self.user,
+            "1001",
+            RenameSessionRequest.model_validate({"title": "Original"}),
+            self.factory,
+        )
         self.assertTrue(self.chat.title_is_manual)
         self.assertEqual(self.chat.title, "Original")
 
     def test_invalid_session_id_rejected_before_database(self):
+        from typing import Any, cast
+
         for value in ("0", "-1", "01", "1.5", "abc", "18446744073709551616", True):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                rename_chat_session(self.user, value, self.request, self.factory)
+                # 负面测试：故意把非字符串送入运行时的 ID 校验。
+                rename_chat_session(self.user, cast(Any, value), self.request, self.factory)
         self.factory.begin.assert_not_called()
 
     def test_invalid_title_rejected_by_existing_schema(self):
         for value in ("", "   ", "x" * 101, None, 12):
             with self.subTest(value=value), self.assertRaises(ValidationError):
-                rename_chat_session(self.user, "1001", RenameSessionRequest(title=value), self.factory)
+                rename_chat_session(
+                    self.user,
+                    "1001",
+                    RenameSessionRequest.model_validate({"title": value}),
+                    self.factory,
+                )
         self.factory.begin.assert_not_called()
 
     def test_missing_or_inaccessible_row_uses_safe_not_found_error(self):
@@ -136,7 +179,11 @@ class RenameChatSessionTest(unittest.TestCase):
         self.writer.flush.assert_not_called()
 
     def test_database_failures_are_redacted_and_not_retried(self):
-        for point in (self.writer.scalar, self.writer.flush, self.factory.begin.return_value.__exit__):
+        for point in (
+            self.writer.scalar,
+            self.writer.flush,
+            self.factory.begin.return_value.__exit__,
+        ):
             with self.subTest(point=point):
                 point.side_effect = SQLAlchemyError("private-sql-dsn")
                 before = self.factory.begin.call_count
@@ -147,7 +194,7 @@ class RenameChatSessionTest(unittest.TestCase):
                 point.side_effect = None
 
     def test_response_validation_failure_leaves_transaction_with_error(self):
-        self.chat.created_at = None
+        setattr(self.chat, "created_at", None)  # noqa: B010 -- 故意构造损坏数据，验证响应校验会拒绝它。
         with self.assertRaises(ValidationError):
             rename_chat_session(self.user, "1001", self.request, self.factory)
         self.assertIs(self.factory.begin.return_value.__exit__.call_args.args[0], ValidationError)
@@ -155,7 +202,9 @@ class RenameChatSessionTest(unittest.TestCase):
 
 class ListChatSessionsTest(unittest.TestCase):
     def setUp(self):
-        self.user = UserResponse(user_id="123", email="student@example.com", display_name="学生")
+        self.user = UserResponse.model_validate(
+            {"user_id": "123", "email": "student@example.com", "display_name": "学生"}
+        )
         self.factory = MagicMock()
         self.reader = self.factory.return_value.__enter__.return_value
         self.reader.scalars.return_value.all.return_value = []
@@ -173,23 +222,41 @@ class ListChatSessionsTest(unittest.TestCase):
         self.assertEqual(statement.compile().params, {"user_id_1": 123})
         sql = str(statement)
         self.assertIn("WHERE chat_sessions.user_id =", sql)
-        self.assertIn("ORDER BY chat_sessions.last_activity_at DESC, chat_sessions.chat_session_id DESC", sql)
+        self.assertIn(
+            "ORDER BY chat_sessions.last_activity_at DESC, chat_sessions.chat_session_id DESC", sql
+        )
         for forbidden in ("LIMIT", "OFFSET", "messages", "JOIN"):
             self.assertNotIn(forbidden, sql)
         self.reader.scalars.assert_called_once()
 
     def test_public_response_preserves_database_order_and_formats_ids_times(self):
         now = datetime(2026, 9, 25)
-        chats = [ChatSession(chat_session_id=i, user_id=123, title=f"Title {i}", title_is_manual=True,
-                             created_at=now, updated_at=now, last_activity_at=now)
-                 for i in (9007199254740993, 12)]
+        chats = [
+            ChatSession(
+                chat_session_id=i,
+                user_id=123,
+                title=f"Title {i}",
+                title_is_manual=True,
+                created_at=now,
+                updated_at=now,
+                last_activity_at=now,
+            )
+            for i in (9007199254740993, 12)
+        ]
         self.reader.scalars.return_value.all.return_value = chats
         result = list_chat_sessions(self.user, self.factory)
         self.assertEqual([item.session_id for item in result.items], ["9007199254740993", "12"])
         self.assertEqual(result.items[0].created_at, now.replace(tzinfo=UTC))
-        self.assertEqual(set(result.items[0].model_dump()), {
-            "session_id", "title", "created_at", "updated_at", "last_activity_at",
-        })
+        self.assertEqual(
+            set(result.items[0].model_dump()),
+            {
+                "session_id",
+                "title",
+                "created_at",
+                "updated_at",
+                "last_activity_at",
+            },
+        )
         self.assertEqual(chats[0].last_activity_at, now)
 
     def test_query_failure_is_redacted_not_empty_result_or_retry(self):

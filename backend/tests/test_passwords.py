@@ -20,8 +20,10 @@ class PasswordTest(unittest.TestCase):
         self.assertTrue(hashed.isascii())
         self.assertNotIn(original, hashed)
         params = extract_parameters(hashed)
-        self.assertEqual((params.type, params.memory_cost, params.time_cost, params.parallelism),
-                         (Type.ID, 65536, 3, 4))
+        self.assertEqual(
+            (params.type, params.memory_cost, params.time_cost, params.parallelism),
+            (Type.ID, 65536, 3, 4),
+        )
         verifier = PasswordHasher()
         self.assertTrue(verifier.verify(hashed, original))
         for wrong in (original.strip(), original.lower(), "**********", "incorrect"):

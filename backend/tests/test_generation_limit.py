@@ -1,5 +1,5 @@
-from concurrent.futures import ThreadPoolExecutor
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from app.services.errors import GenerationRateLimitError
 from app.services.generation_limit import GenerationRateLimiter
@@ -35,11 +35,13 @@ class GenerationLimitTest(unittest.TestCase):
 
     def test_concurrent_checks_do_not_exceed_ten(self):
         limiter = GenerationRateLimiter(clock=lambda: 100)
+
         def check(_):
             try:
                 limiter.check("1")
                 return True
             except GenerationRateLimitError:
                 return False
+
         with ThreadPoolExecutor(max_workers=12) as pool:
             self.assertEqual(sum(pool.map(check, range(30))), 10)

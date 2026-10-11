@@ -1,15 +1,16 @@
 """真实 HTTP → 业务 → 隔离 MySQL，不使用开发者数据库或模型。"""
 
+import unittest
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from tempfile import TemporaryDirectory
 from pathlib import Path
-import unittest
+from tempfile import TemporaryDirectory
+from typing import ClassVar
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import delete, select, update
+from sqlalchemy import Engine, delete, select, update
 
 from app.core.http_config import HTTPSettings
 from app.core.runtime import open_backend_runtime
@@ -18,10 +19,11 @@ from app.core.tokens import hash_session_token
 from app.db.session import build_session_factory
 from app.main import create_app
 from app.models import AuthSession, User
+from testing_support import require_value
 
 
 class AccountHTTPMySQLTest(unittest.TestCase):
-    engine = None
+    engine: ClassVar[Engine]  # 由临时 MySQL 验收入口注入。
 
     def setUp(self):
         self.assertEqual(self.engine.url.database, "migration_test")
@@ -30,7 +32,11 @@ class AccountHTTPMySQLTest(unittest.TestCase):
         self.factory = build_session_factory(self.engine)
         self.created_user_ids = []
         self.email = f"http-{uuid4().hex}@example.com"
-        self.data = {"email": self.email, "password": "http-test-password", "display_name": "网页测试"}
+        self.data = {
+            "email": self.email,
+            "password": "http-test-password",
+            "display_name": "网页测试",
+        }
         self.headers = {"Origin": "http://localhost:5173"}
         self.client = self.enterContext(self.new_client())
 
@@ -40,16 +46,27 @@ class AccountHTTPMySQLTest(unittest.TestCase):
         self.assertNotEqual(self.engine.url.port, 3306)
         if self.created_user_ids:
             with self.factory.begin() as session:
-                session.execute(delete(AuthSession).where(AuthSession.user_id.in_(self.created_user_ids)))
+                session.execute(
+                    delete(AuthSession).where(AuthSession.user_id.in_(self.created_user_ids))
+                )
                 session.execute(delete(User).where(User.user_id.in_(self.created_user_ids)))
 
     def new_client(self):
         @contextmanager
         def runtime():
-            with open_backend_runtime(self.engine, lock=RuntimeLock(Path(self.folder) / "http.lock")) as active:
+            with open_backend_runtime(
+                self.engine, lock=RuntimeLock(Path(self.folder) / "http.lock")
+            ) as active:
                 yield active
-        return TestClient(create_app(runtime_factory=runtime, http_settings=HTTPSettings(
-            _env_file=None, allowed_origins=[self.headers["Origin"]], cookie_secure=False)))
+
+        return TestClient(
+            create_app(
+                runtime_factory=runtime,
+                http_settings=HTTPSettings.from_sources(
+                    _env_file=None, allowed_origins=[self.headers["Origin"]], cookie_secure=False
+                ),
+            )
+        )
 
     def register(self):
         response = self.client.post("/api/v1/auth/register", json=self.data, headers=self.headers)
@@ -58,8 +75,11 @@ class AccountHTTPMySQLTest(unittest.TestCase):
         return response.json()
 
     def login(self):
-        response = self.client.post("/api/v1/auth/login", json={
-            "email": self.email, "password": self.data["password"]}, headers=self.headers)
+        response = self.client.post(
+            "/api/v1/auth/login",
+            json={"email": self.email, "password": self.data["password"]},
+            headers=self.headers,
+        )
         self.assertEqual(response.status_code, 200, response.text)
         return self.client.cookies.get("chat_session")
 
@@ -72,36 +92,49 @@ class AccountHTTPMySQLTest(unittest.TestCase):
         self.assertNotIn("password_hash", me.text)
         with self.factory() as session:
             user = session.scalar(select(User).where(User.email == self.email))
-            auth = session.scalar(select(AuthSession).where(AuthSession.user_id == user.user_id))
-            self.assertNotEqual(user.password_hash, self.data["password"])
-            self.assertEqual(auth.token_hash, hash_session_token(SecretStr(token)))
-            self.assertNotEqual(auth.token_hash, token)
-            self.assertEqual(auth.expires_at - auth.created_at, timedelta(days=7))
+            auth = session.scalar(
+                select(AuthSession).where(AuthSession.user_id == require_value(user).user_id)
+            )
+            self.assertNotEqual(require_value(user).password_hash, self.data["password"])
+            self.assertEqual(
+                require_value(auth).token_hash, hash_session_token(SecretStr(require_value(token)))
+            )
+            self.assertNotEqual(require_value(auth).token_hash, token)
+            self.assertEqual(
+                require_value(auth).expires_at - require_value(auth).created_at, timedelta(days=7)
+            )
         response = self.client.post("/api/v1/auth/logout", headers=self.headers)
         self.assertEqual(response.status_code, 204)
         self.assertEqual(response.content, b"")
         self.assertIsNone(self.client.cookies.get("chat_session"))
-        self.client.cookies.set("chat_session", token)
+        self.client.cookies.set("chat_session", require_value(token))
         self.assertEqual(self.client.get("/api/v1/users/me").status_code, 401)
-        self.assertEqual(self.client.post("/api/v1/auth/logout", headers=self.headers).status_code, 204)
+        self.assertEqual(
+            self.client.post("/api/v1/auth/logout", headers=self.headers).status_code, 204
+        )
 
     def test_duplicate_register_wrong_password_rotation_and_disabled_user(self):
         user = self.register()
         duplicate = self.client.post("/api/v1/auth/register", json=self.data, headers=self.headers)
         self.assertEqual(duplicate.status_code, 409)
-        wrong = self.client.post("/api/v1/auth/login", json={
-            "email": self.email, "password": "wrong"}, headers=self.headers)
+        wrong = self.client.post(
+            "/api/v1/auth/login",
+            json={"email": self.email, "password": "wrong"},
+            headers=self.headers,
+        )
         self.assertEqual(wrong.status_code, 401)
         first = self.login()
         second = self.login()
         self.assertNotEqual(first, second)
         self.client.cookies.clear()
-        self.client.cookies.set("chat_session", first)
+        self.client.cookies.set("chat_session", require_value(first))
         self.assertEqual(self.client.get("/api/v1/users/me").status_code, 401)
-        self.client.cookies.set("chat_session", second)
+        self.client.cookies.set("chat_session", require_value(second))
         self.assertEqual(self.client.get("/api/v1/users/me").status_code, 200)
         with self.factory.begin() as session:
-            session.execute(update(User).where(User.user_id == int(user["user_id"])).values(status="DISABLED"))
+            session.execute(
+                update(User).where(User.user_id == int(user["user_id"])).values(status="DISABLED")
+            )
         self.assertEqual(self.client.get("/api/v1/users/me").status_code, 401)
 
     def test_persisted_cookie_survives_restart_and_expired_cookie_fails(self):
@@ -109,13 +142,18 @@ class AccountHTTPMySQLTest(unittest.TestCase):
         token = self.login()
         self.client.__exit__(None, None, None)
         with self.new_client() as restarted:
-            restarted.cookies.set("chat_session", token)
+            restarted.cookies.set("chat_session", require_value(token))
             self.assertEqual(restarted.get("/api/v1/users/me").status_code, 200)
             with self.factory.begin() as session:
                 now = datetime.now(UTC).replace(tzinfo=None)
-                session.execute(update(AuthSession).where(
-                    AuthSession.token_hash == hash_session_token(SecretStr(token))).values(
-                        created_at=now - timedelta(days=8), expires_at=now - timedelta(days=1)))
+                session.execute(
+                    update(AuthSession)
+                    .where(
+                        AuthSession.token_hash
+                        == hash_session_token(SecretStr(require_value(token)))
+                    )
+                    .values(created_at=now - timedelta(days=8), expires_at=now - timedelta(days=1))
+                )
             self.assertEqual(restarted.get("/api/v1/users/me").status_code, 401)
 
     def test_two_accounts_cookie_identity_cannot_be_overridden_by_user_id(self):

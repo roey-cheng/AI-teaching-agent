@@ -1,21 +1,40 @@
 """只在验收脚本创建的临时 MySQL 上检查输入快照和准入回滚；不调用模型。"""
 
+import unittest
 from dataclasses import replace
 from datetime import datetime
-import unittest
+from typing import ClassVar
+from unittest.mock import MagicMock
 from uuid import uuid4
 
-from sqlalchemy import select
+from message_submission_mysql_cases import MessageSubmissionMySQLTest
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.agent.input_policy import AgentInputPolicy
 from app.models import AgentMemory, Message
+from app.schemas import DuplicateMessageResponse, SendMessageRequest, SessionResponse, UserResponse
 from app.services.agent_input import prepare_agent_input
 from app.services.chat_sessions import create_chat_session
-from app.services.errors import AgentInputUnavailableError, ContextTooLargeError, SessionNotFoundError
-from message_submission_mysql_cases import MessageSubmissionMySQLTest
+from app.services.errors import (
+    AgentInputUnavailableError,
+    ContextTooLargeError,
+    SessionNotFoundError,
+)
+from app.services.generation_registry import GenerationRegistry
+from app.services.message_submission import AcceptedMessage
+from testing_support import require_type, require_value
 
 
 class AgentInputMySQLTest(unittest.TestCase):
-    engine = None
+    factory: sessionmaker[Session]
+    user: UserResponse
+    chat: SessionResponse
+    request: SendMessageRequest
+    policy: AgentInputPolicy
+    registry: GenerationRegistry
+    check: MagicMock
+    engine: ClassVar[Engine]  # 由临时 MySQL 验收入口注入。
     # 复用测试夹具方法，不继承其他 TestCase 的测试用例。
     setUp = MessageSubmissionMySQLTest.setUp
     accept = MessageSubmissionMySQLTest.accept
@@ -24,31 +43,58 @@ class AgentInputMySQLTest(unittest.TestCase):
 
     def prepare(self, user=None, chat_id=None):
         with self.factory() as session:
-            return prepare_agent_input(session, user or self.user, chat_id or self.chat.session_id,
-                                       self.request, self.policy)
+            return prepare_agent_input(
+                session,
+                user or self.user,
+                chat_id or self.chat.session_id,
+                self.request,
+                self.policy,
+            )
 
     def pair(self, label, chat_id=None, failed=False, missing_answer=False):
         # 相同时间戳特意覆盖 message_id 排序/翻页。
         now = datetime(2026, 9, 25)
         with self.factory.begin() as session:
-            q = Message(chat_session_id=int(chat_id or self.chat.session_id), role="USER", content=label,
-                        client_message_key=str(uuid4()), attempt_id=str(uuid4()),
-                        generation_status="FAILED" if failed else "SUCCEEDED", created_at=now, updated_at=now)
+            q = Message(
+                chat_session_id=int(chat_id or self.chat.session_id),
+                role="USER",
+                content=label,
+                client_message_key=str(uuid4()),
+                attempt_id=str(uuid4()),
+                generation_status="FAILED" if failed else "SUCCEEDED",
+                created_at=now,
+                updated_at=now,
+            )
             if failed:
                 q.generation_error_code = "MODEL_REQUEST_FAILED"
                 q.generation_error_message = "Safe error"
             session.add(q)
             session.flush()
             if not failed and not missing_answer:
-                session.add(Message(chat_session_id=q.chat_session_id, role="ASSISTANT", content=f"Answer {label}",
-                                    in_reply_to_message_id=q.message_id, created_at=now, updated_at=now))
+                session.add(
+                    Message(
+                        chat_session_id=q.chat_session_id,
+                        role="ASSISTANT",
+                        content=f"Answer {label}",
+                        in_reply_to_message_id=q.message_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
             return str(q.message_id)
 
     def memory(self, user_id=None, summary="喜欢中文"):
         with self.factory.begin() as session:
-            session.add(AgentMemory(user_id=int(user_id or self.user.user_id), memory_key="preference.language",
-                                    memory_type="LEARNING_PREFERENCE", summary=summary,
-                                    created_at=datetime(2026, 9, 25), updated_at=datetime(2026, 9, 25)))
+            session.add(
+                AgentMemory(
+                    user_id=int(user_id or self.user.user_id),
+                    memory_key="preference.language",
+                    memory_type="LEARNING_PREFERENCE",
+                    summary=summary,
+                    created_at=datetime(2026, 9, 25),
+                    updated_at=datetime(2026, 9, 25),
+                )
+            )
 
     def test_sixty_rounds_sorted_and_failed_questions_excluded(self):
         ids = [self.pair(f"question-{i}") for i in range(60)]
@@ -69,12 +115,18 @@ class AgentInputMySQLTest(unittest.TestCase):
         self.assertIn("喜欢中文", result.profile_memory)
         self.assertNotIn("other chat private", [m.content for m in result.messages])
         with self.factory() as session:
-            self.assertEqual(len(session.scalars(select(AgentMemory).where(
-                AgentMemory.user_id == int(self.user.user_id))).all()), 1)
+            self.assertEqual(
+                len(
+                    session.scalars(
+                        select(AgentMemory).where(AgentMemory.user_id == int(self.user.user_id))
+                    ).all()
+                ),
+                1,
+            )
 
     def test_cross_user_access_and_memory_are_isolated(self):
         fixture = MessageSubmissionMySQLTest()
-        fixture.engine = self.engine
+        type(fixture).engine = self.engine
         fixture.setUp()
         self.memory(summary="owner memory")
         self.memory(user_id=fixture.user.user_id, summary="other user secret")
@@ -82,14 +134,20 @@ class AgentInputMySQLTest(unittest.TestCase):
         result = self.prepare()
         self.assertIn("owner memory", result.profile_memory)
         self.assertNotIn("other user secret", result.profile_memory)
-        for user, chat_id in ((self.user, fixture.chat.session_id), (fixture.user, self.chat.session_id)):
+        for user, chat_id in (
+            (self.user, fixture.chat.session_id),
+            (fixture.user, self.chat.session_id),
+        ):
             with self.assertRaises(SessionNotFoundError):
                 self.prepare(user=user, chat_id=chat_id)
 
     def test_too_large_rejected_before_insert_key_title_or_occupancy(self):
         before = self.snapshot_chat()
         original = self.policy
-        self.policy = replace(self.policy, app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1)
+        self.policy = replace(
+            self.policy,
+            app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1,
+        )
         with self.assertRaises(ContextTooLargeError), self.accept():
             self.fail("Must not accept")
         self.assertEqual(self.rows(), [])
@@ -98,28 +156,39 @@ class AgentInputMySQLTest(unittest.TestCase):
         self.check.assert_not_called()
         self.policy = original
         with self.accept() as accepted:  # 同一个 key 没有被失败准入消耗。
-            self.assertEqual(accepted.prepared_input.messages[-1].content, self.request.content)
+            self.assertEqual(
+                require_type(accepted, AcceptedMessage).prepared_input.messages[-1].content,
+                self.request.content,
+            )
         self.assertEqual(len(self.rows()), 1)
 
     def test_accepted_snapshot_does_not_reload_or_duplicate_current_question(self):
         old_id = self.pair("previous")
         self.memory()
         with self.accept() as accepted:
-            prepared = accepted.prepared_input
-            self.assertEqual([m.source_message_id for m in prepared.messages], [old_id, str(int(old_id) + 1), None])
+            prepared = require_type(accepted, AcceptedMessage).prepared_input
+            self.assertEqual(
+                [m.source_message_id for m in prepared.messages],
+                [old_id, str(int(old_id) + 1), None],
+            )
             self.assertEqual(sum(m.content == self.request.content for m in prepared.messages), 1)
             self.assertEqual(len(self.rows()), 3)
             with self.factory.begin() as session:
-                memory = session.scalar(select(AgentMemory).where(AgentMemory.user_id == int(self.user.user_id)))
-                memory.summary = "Changed after acceptance"
+                memory = session.scalar(
+                    select(AgentMemory).where(AgentMemory.user_id == int(self.user.user_id))
+                )
+                require_value(memory).summary = "Changed after acceptance"
             self.assertIn("喜欢中文", prepared.profile_memory)
             self.assertNotIn("Changed after acceptance", prepared.profile_memory)
 
     def test_duplicate_does_not_reassemble_with_smaller_budget(self):
         with self.accept() as first:
-            self.policy = replace(self.policy, app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1)
+            self.policy = replace(
+                self.policy,
+                app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1,
+            )
             with self.accept() as duplicate:
-                self.assertTrue(duplicate.duplicate)
+                self.assertTrue(require_type(duplicate, DuplicateMessageResponse).duplicate)
                 self.assertEqual(duplicate.attempt_id, first.attempt_id)
         self.check.assert_called_once()
         self.assertEqual(len(self.rows()), 1)
@@ -137,8 +206,13 @@ class AgentInputMySQLTest(unittest.TestCase):
         baseline = self.prepare().estimated_input_tokens
         self.pair("old large " + "文" * 300)
         newest = self.pair("new")
-        self.policy = replace(self.policy, app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit
-                              + baseline + 100)
+        self.policy = replace(
+            self.policy,
+            app_context_tokens=self.policy.app_context_tokens
+            - self.policy.input_limit
+            + baseline
+            + 100,
+        )
         result = self.prepare()
         self.assertEqual(result.history_rounds, 1)
         self.assertTrue(result.history_truncated)

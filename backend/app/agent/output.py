@@ -1,7 +1,7 @@
 """只读取主模型对外返回的文字；不把工具参数、记忆或 LangGraph 状态当成回复。"""
 
-from dataclasses import dataclass
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from langchain_core.messages import AIMessageChunk
 
@@ -28,12 +28,16 @@ class VisibleChunk:
 def extract_visible_chunk(chunk, metadata: dict) -> VisibleChunk:
     if not isinstance(chunk, AIMessageChunk) or metadata.get("langgraph_node") != "model":
         return VisibleChunk()
-    if (chunk.tool_calls or chunk.invalid_tool_calls or chunk.tool_call_chunks
-            or chunk.additional_kwargs.get("tool_calls")):
+    if (
+        chunk.tool_calls
+        or chunk.invalid_tool_calls
+        or chunk.tool_call_chunks
+        or chunk.additional_kwargs.get("tool_calls")
+    ):
         raise AgentToolUseNotAllowedError()
     reasoning = chunk.additional_kwargs.get("reasoning_content", "") or ""
     if not isinstance(reasoning, str):
-        raise ValueError("Invalid model reasoning payload")
+        raise TypeError("Invalid model reasoning payload")
     answer = ""
     block_reasoning = ""
     if isinstance(chunk.content, str):
@@ -48,4 +52,6 @@ def extract_visible_chunk(chunk, metadata: dict) -> VisibleChunk:
                 elif block.get("type") == "reasoning" and isinstance(block.get("reasoning"), str):
                     block_reasoning += block["reasoning"]
     # 有些适配器同时保留供应商字段和标准块，只取一份，避免重复展示。
-    return VisibleChunk(reasoning or block_reasoning, answer, chunk.response_metadata.get("finish_reason"))
+    return VisibleChunk(
+        reasoning or block_reasoning, answer, chunk.response_metadata.get("finish_reason")
+    )

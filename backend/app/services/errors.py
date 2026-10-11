@@ -57,7 +57,9 @@ class SessionUnavailableError(Exception):
     code = "SESSION_UNAVAILABLE"
 
     def __init__(self) -> None:
-        super().__init__("The session operation could not be confirmed. Please refresh before trying again.")
+        super().__init__(
+            "The session operation could not be confirmed. Please refresh before trying again."
+        )
 
 
 class SessionNotFoundError(Exception):
@@ -92,14 +94,18 @@ class MessageSendUnavailableError(Exception):
     code = "MESSAGE_SEND_UNAVAILABLE"
 
     def __init__(self) -> None:
-        super().__init__("Message processing could not be confirmed. Please check the conversation before trying again.")
+        super().__init__(
+            "Message processing could not be confirmed. Please check the conversation before trying again."
+        )
 
 
 class ContextTooLargeError(Exception):
     code = "CONTEXT_TOO_LARGE"
 
     def __init__(self) -> None:
-        super().__init__("The question and required context exceed the input budget. Please shorten the question.")
+        super().__init__(
+            "The question and required context exceed the input budget. Please shorten the question."
+        )
 
 
 class AgentInputUnavailableError(Exception):
@@ -121,7 +127,9 @@ class MemoryUnavailableError(Exception):
     code = "MEMORY_UNAVAILABLE"
 
     def __init__(self):
-        super().__init__("Memory operation could not be confirmed. Please refresh before trying again.")
+        super().__init__(
+            "Memory operation could not be confirmed. Please refresh before trying again."
+        )
 
 
 class MessageNotFoundError(Exception):

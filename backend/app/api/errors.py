@@ -1,7 +1,7 @@
 """统一安全错误；不回传原始请求、SQL、密码或异常文本。"""
 
-from http import HTTPStatus
 import logging
+from http import HTTPStatus
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -25,7 +25,13 @@ class APIError(Exception):
 
 def error_response(request: Request, status: int, code: str, message: str, headers=None):
     request_id = getattr(request.state, "request_id", "req_" + uuid4().hex)
-    body = ErrorResponse(error=ErrorDetail(code=code, message=message, request_id=request_id))
+    body = ErrorResponse.model_validate(
+        {
+            "error": ErrorDetail.model_validate(
+                {"code": code, "message": message, "request_id": request_id}
+            )
+        }
+    )
     return JSONResponse(body.model_dump(), status_code=status, headers=headers)
 
 
@@ -37,12 +43,19 @@ def install_error_handlers(app: FastAPI):
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, error):
         # FastAPI 默认的 errors() 包含 input；密码校验失败时也不能回显。
-        return error_response(request, 422, "VALIDATION_ERROR", "Invalid request fields or JSON body.")
+        return error_response(
+            request, 422, "VALIDATION_ERROR", "Invalid request fields or JSON body."
+        )
 
     @app.exception_handler(HTTPException)
     async def http_error(request, error):
-        return error_response(request, error.status_code, "HTTP_ERROR",
-                              HTTPStatus(error.status_code).phrase, error.headers)
+        return error_response(
+            request,
+            error.status_code,
+            "HTTP_ERROR",
+            HTTPStatus(error.status_code).phrase,
+            error.headers,
+        )
 
     mapping = {
         errors.EmailAlreadyRegisteredError: 409,
@@ -76,8 +89,13 @@ def install_error_handlers(app: FastAPI):
 
     @app.exception_handler(errors.GenerationRateLimitError)
     async def generation_limit(request, error):
-        return error_response(request, 429, "RATE_LIMITED", "Too many new generations. Please wait before sending another message.",
-                              {"Retry-After": str(error.retry_after_seconds)})
+        return error_response(
+            request,
+            429,
+            "RATE_LIMITED",
+            "Too many new generations. Please wait before sending another message.",
+            {"Retry-After": str(error.retry_after_seconds)},
+        )
 
 
 class RequestContextMiddleware:
@@ -106,10 +124,12 @@ class RequestContextMiddleware:
 
         try:
             await self.app(scope, receive, safe_send)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- HTTP 最外层错误边界：记录请求编号，不外泄 SQL、密钥或原异常。
             # 不向 Uvicorn 传播带 SQL/凭据的原始异常；取消不是 Exception，仍正常传播。
             logger.error("Unhandled HTTP error; request_id=%s", request_id)
             if started:
                 raise RuntimeError("Response interrupted; internal details suppressed.") from None
-            response = error_response(Request(scope), 500, "INTERNAL_ERROR", "An unexpected error occurred.")
+            response = error_response(
+                Request(scope), 500, "INTERNAL_ERROR", "An unexpected error occurred."
+            )
             await response(scope, receive, safe_send)

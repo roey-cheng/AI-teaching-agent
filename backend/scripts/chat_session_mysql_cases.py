@@ -1,13 +1,14 @@
 """会话管理的隔离 MySQL 验收；仅使用临时容器注入的 Engine。"""
 
+import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
-import unittest
+from typing import ClassVar
 from unittest.mock import patch
 from uuid import uuid4
 
-from sqlalchemy import event, select, update
+from sqlalchemy import Engine, Table, event, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.session import build_session_factory
@@ -18,10 +19,11 @@ from app.services.authentication import get_current_user
 from app.services.chat_sessions import create_chat_session, list_chat_sessions, rename_chat_session
 from app.services.errors import SessionNotFoundError, SessionUnavailableError
 from app.services.login import login_user
+from testing_support import require_type, require_value
 
 
 class ChatSessionMySQLTest(unittest.TestCase):
-    engine = None
+    engine: ClassVar[Engine]  # 由临时 MySQL 验收入口注入。
 
     def setUp(self):
         self.factory = build_session_factory(self.engine)
@@ -29,14 +31,24 @@ class ChatSessionMySQLTest(unittest.TestCase):
 
     def authenticated_user(self):
         email = f"chat-create-{uuid4().hex}@example.com"
-        register_user(RegisterRequest(email=email, password="test-password", display_name="Chat tester"), self.factory)
-        login = login_user(LoginRequest(email=email, password="test-password"), self.factory)
+        register_user(
+            RegisterRequest.model_validate(
+                {"email": email, "password": "test-password", "display_name": "Chat tester"}
+            ),
+            self.factory,
+        )
+        login = login_user(
+            LoginRequest.model_validate({"email": email, "password": "test-password"}), self.factory
+        )
         return get_current_user(login.token, self.factory)
 
     def rows(self):
         with self.factory() as session:
-            return session.execute(select(ChatSession.__table__).where(
-                ChatSession.user_id == int(self.user.user_id))).all()
+            return session.execute(
+                select(require_type(ChatSession.__table__, Table)).where(
+                    ChatSession.user_id == int(self.user.user_id)
+                )
+            ).all()
 
     def test_creation_persists_defaults_and_returns_database_id_and_utc(self):
         result = create_chat_session(self.user, self.factory)
@@ -50,9 +62,16 @@ class ChatSessionMySQLTest(unittest.TestCase):
         self.assertEqual(row.created_at, row.updated_at)
         self.assertEqual(row.created_at, row.last_activity_at)
         self.assertEqual(result.created_at, row.created_at.replace(tzinfo=UTC))
-        self.assertEqual(set(result.model_dump()), {
-            "session_id", "title", "created_at", "updated_at", "last_activity_at",
-        })
+        self.assertEqual(
+            set(result.model_dump()),
+            {
+                "session_id",
+                "title",
+                "created_at",
+                "updated_at",
+                "last_activity_at",
+            },
+        )
 
     def test_multiple_calls_and_users_create_separate_owned_sessions(self):
         first = create_chat_session(self.user, self.factory)
@@ -62,13 +81,23 @@ class ChatSessionMySQLTest(unittest.TestCase):
         self.assertEqual(len({first.session_id, second.session_id, third.session_id}), 3)
         self.assertEqual(len(self.rows()), 2)
         with self.factory() as session:
-            self.assertEqual(session.get(ChatSession, int(third.session_id)).user_id, int(other_user.user_id))
+            self.assertEqual(
+                require_value(session.get(ChatSession, int(third.session_id))).user_id,
+                int(require_value(other_user).user_id),
+            )
 
     def test_creation_does_not_change_users_logins_messages_or_memories(self):
         def snapshot():
             with self.factory() as session:
-                return [session.execute(select(model.__table__).order_by(*model.__table__.primary_key.columns)).all()
-                        for model in (User, AuthSession, Message, AgentMemory)]
+                return [
+                    session.execute(
+                        select(require_type(model.__table__, Table)).order_by(
+                            *require_type(model.__table__, Table).primary_key.columns
+                        )
+                    ).all()
+                    for model in (User, AuthSession, Message, AgentMemory)
+                ]
+
         before = snapshot()
         create_chat_session(self.user, self.factory)
         self.assertEqual(snapshot(), before)
@@ -76,6 +105,7 @@ class ChatSessionMySQLTest(unittest.TestCase):
     def test_failure_before_commit_rolls_back_insert(self):
         def fail_before_commit(session):
             raise SQLAlchemyError("fixture-private-error")
+
         event.listen(self.factory, "before_commit", fail_before_commit)
         try:
             with self.assertRaises(SessionUnavailableError):
@@ -87,9 +117,14 @@ class ChatSessionMySQLTest(unittest.TestCase):
         self.assertEqual(len(self.rows()), 1)
 
     def test_response_validation_failure_rolls_back_flushed_insert(self):
-        with patch("app.services.chat_sessions.SessionResponse.model_validate", side_effect=ValueError("fixture")):
-            with self.assertRaises(ValueError):
-                create_chat_session(self.user, self.factory)
+        with (
+            patch(
+                "app.services.chat_sessions.SessionResponse.model_validate",
+                side_effect=ValueError("fixture"),
+            ),
+            self.assertRaises(ValueError),
+        ):
+            create_chat_session(self.user, self.factory)
         self.assertEqual(self.rows(), [])
 
     def test_list_empty_even_when_other_user_has_sessions(self):
@@ -106,22 +141,40 @@ class ChatSessionMySQLTest(unittest.TestCase):
         with self.factory.begin() as session:
             for index, chat in enumerate(sessions):
                 # 前两条活动时间相同，第三条虽然编号更大但活动更早，应排最后。
-                session.execute(update(ChatSession).where(ChatSession.chat_session_id == int(chat.session_id))
-                                .values(last_activity_at=now if index < 2 else now - timedelta(days=1),
-                                        updated_at=now + timedelta(days=index)))
+                session.execute(
+                    update(ChatSession)
+                    .where(ChatSession.chat_session_id == int(chat.session_id))
+                    .values(
+                        last_activity_at=now if index < 2 else now - timedelta(days=1),
+                        updated_at=now + timedelta(days=index),
+                    )
+                )
         result = list_chat_sessions(self.user, self.factory)
-        self.assertEqual([item.session_id for item in result.items],
-                         [sessions[1].session_id, sessions[0].session_id, sessions[2].session_id])
+        self.assertEqual(
+            [item.session_id for item in result.items],
+            [sessions[1].session_id, sessions[0].session_id, sessions[2].session_id],
+        )
         self.assertNotIn(hidden.session_id, [item.session_id for item in result.items])
-        self.assertEqual([item.session_id for item in list_chat_sessions(other, self.factory).items],
-                         [hidden.session_id])
+        self.assertEqual(
+            [item.session_id for item in list_chat_sessions(other, self.factory).items],
+            [hidden.session_id],
+        )
 
     def test_list_returns_all_sessions_without_silent_page_limit(self):
         now = datetime.now(UTC).replace(tzinfo=None)
         with self.factory.begin() as session:
-            session.add_all([ChatSession(user_id=int(self.user.user_id), title=f"Chat {i}",
-                                         created_at=now, updated_at=now, last_activity_at=now)
-                             for i in range(105)])
+            session.add_all(
+                [
+                    ChatSession(
+                        user_id=int(self.user.user_id),
+                        title=f"Chat {i}",
+                        created_at=now,
+                        updated_at=now,
+                        last_activity_at=now,
+                    )
+                    for i in range(105)
+                ]
+            )
         result = list_chat_sessions(self.user, self.factory)
         self.assertEqual(len(result.items), 105)
         ids = [int(item.session_id) for item in result.items]
@@ -129,14 +182,24 @@ class ChatSessionMySQLTest(unittest.TestCase):
 
     def test_list_only_reads_chat_table_and_leaves_all_data_unchanged(self):
         create_chat_session(self.user, self.factory)
+
         def snapshot():
             with self.factory() as session:
-                return [session.execute(select(model.__table__).order_by(*model.__table__.primary_key.columns)).all()
-                        for model in (User, AuthSession, ChatSession, Message, AgentMemory)]
+                return [
+                    session.execute(
+                        select(require_type(model.__table__, Table)).order_by(
+                            *require_type(model.__table__, Table).primary_key.columns
+                        )
+                    ).all()
+                    for model in (User, AuthSession, ChatSession, Message, AgentMemory)
+                ]
+
         before = snapshot()
         statements = []
+
         def capture(connection, cursor, statement, parameters, context, executemany):
             statements.append(statement)
+
         event.listen(self.engine, "before_cursor_execute", capture)
         try:
             list_chat_sessions(self.user, self.factory)
@@ -151,18 +214,32 @@ class ChatSessionMySQLTest(unittest.TestCase):
     def test_rename_persists_trimmed_title_without_reordering_or_changing_other_rows(self):
         first = create_chat_session(self.user, self.factory)
         create_chat_session(self.user, self.factory)
+
         def snapshot():
             with self.factory() as session:
-                return [session.execute(select(model.__table__).order_by(*model.__table__.primary_key.columns)).all()
-                        for model in (User, AuthSession, Message, AgentMemory)]
+                return [
+                    session.execute(
+                        select(require_type(model.__table__, Table)).order_by(
+                            *require_type(model.__table__, Table).primary_key.columns
+                        )
+                    ).all()
+                    for model in (User, AuthSession, Message, AgentMemory)
+                ]
+
         before_other = snapshot()
         before_rows = {row.chat_session_id: row for row in self.rows()}
-        before_order = [item.session_id for item in list_chat_sessions(self.user, self.factory).items]
+        before_order = [
+            item.session_id for item in list_chat_sessions(self.user, self.factory).items
+        ]
         updated_time = first.updated_at + timedelta(seconds=1)
         with patch("app.services.chat_sessions.datetime") as clock:
             clock.now.return_value = updated_time
-            result = rename_chat_session(self.user, first.session_id,
-                                         RenameSessionRequest(title="  Python 学习🙂  "), self.factory)
+            result = rename_chat_session(
+                self.user,
+                first.session_id,
+                RenameSessionRequest.model_validate({"title": "  Python 学习🙂  "}),
+                self.factory,
+            )
         after_rows = {row.chat_session_id: row for row in self.rows()}
         row = after_rows[int(first.session_id)]
         self.assertEqual(row.title, "Python 学习🙂")
@@ -171,10 +248,13 @@ class ChatSessionMySQLTest(unittest.TestCase):
         self.assertEqual(result.created_at, first.created_at)
         self.assertEqual(result.last_activity_at, first.last_activity_at)
         self.assertEqual(row.updated_at, updated_time.replace(tzinfo=None))
-        for key in before_rows:
+        for key, previous in before_rows.items():
             if key != int(first.session_id):
-                self.assertEqual(after_rows[key], before_rows[key])
-        self.assertEqual([item.session_id for item in list_chat_sessions(self.user, self.factory).items], before_order)
+                self.assertEqual(after_rows[key], previous)
+        self.assertEqual(
+            [item.session_id for item in list_chat_sessions(self.user, self.factory).items],
+            before_order,
+        )
         self.assertEqual(snapshot(), before_other)
 
     def test_rename_other_user_and_missing_session_have_same_error(self):
@@ -183,7 +263,12 @@ class ChatSessionMySQLTest(unittest.TestCase):
         failures = []
         for session_id in (hidden.session_id, "18446744073709551615"):
             with self.assertRaises(SessionNotFoundError) as caught:
-                rename_chat_session(self.user, session_id, RenameSessionRequest(title="Forbidden"), self.factory)
+                rename_chat_session(
+                    self.user,
+                    session_id,
+                    RenameSessionRequest.model_validate({"title": "Forbidden"}),
+                    self.factory,
+                )
             failures.append((caught.exception.code, str(caught.exception)))
         self.assertEqual(failures[0], failures[1])
         self.assertEqual(list_chat_sessions(other, self.factory).items[0].title, hidden.title)
@@ -191,10 +276,20 @@ class ChatSessionMySQLTest(unittest.TestCase):
 
     def test_rename_same_title_marks_manual_and_accepts_100_characters(self):
         chat = create_chat_session(self.user, self.factory)
-        rename_chat_session(self.user, chat.session_id, RenameSessionRequest(title=chat.title), self.factory)
+        rename_chat_session(
+            self.user,
+            chat.session_id,
+            RenameSessionRequest.model_validate({"title": chat.title}),
+            self.factory,
+        )
         self.assertTrue(self.rows()[0].title_is_manual)
         title = "文" * 100
-        response = rename_chat_session(self.user, chat.session_id, RenameSessionRequest(title=title), self.factory)
+        response = rename_chat_session(
+            self.user,
+            chat.session_id,
+            RenameSessionRequest.model_validate({"title": title}),
+            self.factory,
+        )
         self.assertEqual(response.title, title)
         self.assertEqual(self.rows()[0].title, title)
 
@@ -202,38 +297,82 @@ class ChatSessionMySQLTest(unittest.TestCase):
         chat = create_chat_session(self.user, self.factory)
         now = datetime.now(UTC).replace(tzinfo=None)
         with self.factory.begin() as session:
-            session.add(Message(chat_session_id=int(chat.session_id), role="USER", content="Question",
-                                client_message_key=str(uuid4()), attempt_id=str(uuid4()), generation_status="RUNNING",
-                                created_at=now, updated_at=now))
-        result = rename_chat_session(self.user, chat.session_id, RenameSessionRequest(title="Still running"), self.factory)
+            session.add(
+                Message(
+                    chat_session_id=int(chat.session_id),
+                    role="USER",
+                    content="Question",
+                    client_message_key=str(uuid4()),
+                    attempt_id=str(uuid4()),
+                    generation_status="RUNNING",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        result = rename_chat_session(
+            self.user,
+            chat.session_id,
+            RenameSessionRequest.model_validate({"title": "Still running"}),
+            self.factory,
+        )
         self.assertEqual(result.title, "Still running")
         with self.factory() as session:
-            self.assertEqual(session.scalar(select(Message.generation_status).where(
-                Message.chat_session_id == int(chat.session_id))), "RUNNING")
+            self.assertEqual(
+                session.scalar(
+                    select(Message.generation_status).where(
+                        Message.chat_session_id == int(chat.session_id)
+                    )
+                ),
+                "RUNNING",
+            )
 
     def test_rename_commit_and_response_failures_roll_back_all_changes(self):
         chat = create_chat_session(self.user, self.factory)
         before = self.rows()
+
         def fail(session):
             raise SQLAlchemyError("fixture-private-error")
+
         event.listen(self.factory, "before_commit", fail)
         try:
             with self.assertRaises(SessionUnavailableError):
-                rename_chat_session(self.user, chat.session_id, RenameSessionRequest(title="Rollback"), self.factory)
+                rename_chat_session(
+                    self.user,
+                    chat.session_id,
+                    RenameSessionRequest.model_validate({"title": "Rollback"}),
+                    self.factory,
+                )
         finally:
             event.remove(self.factory, "before_commit", fail)
         self.assertEqual(self.rows(), before)
-        with patch("app.services.chat_sessions.SessionResponse.model_validate", side_effect=ValueError("fixture")):
-            with self.assertRaises(ValueError):
-                rename_chat_session(self.user, chat.session_id, RenameSessionRequest(title="Rollback again"), self.factory)
+        with (
+            patch(
+                "app.services.chat_sessions.SessionResponse.model_validate",
+                side_effect=ValueError("fixture"),
+            ),
+            self.assertRaises(ValueError),
+        ):
+            rename_chat_session(
+                self.user,
+                chat.session_id,
+                RenameSessionRequest.model_validate({"title": "Rollback again"}),
+                self.factory,
+            )
         self.assertEqual(self.rows(), before)
 
     def test_concurrent_renames_complete_and_preserve_activity(self):
         chat = create_chat_session(self.user, self.factory)
         barrier = Barrier(2)
+
         def rename(title):
             barrier.wait(timeout=10)
-            return rename_chat_session(self.user, chat.session_id, RenameSessionRequest(title=title), self.factory)
+            return rename_chat_session(
+                self.user,
+                chat.session_id,
+                RenameSessionRequest.model_validate({"title": title}),
+                self.factory,
+            )
+
         with ThreadPoolExecutor(max_workers=2) as pool:
             jobs = [pool.submit(rename, title) for title in ("First", "Second")]
             self.assertEqual([job.result(timeout=15).title for job in jobs], ["First", "Second"])

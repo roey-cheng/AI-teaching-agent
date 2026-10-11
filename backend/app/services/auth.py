@@ -1,7 +1,7 @@
 """注册业务：查重、密码哈希、保存用户；没有 HTTP 路由或自动登录。"""
 
-from datetime import UTC, datetime
 import re
+from datetime import UTC, datetime
 
 from pymysql.err import IntegrityError as MySQLIntegrityError
 from sqlalchemy import select
@@ -22,7 +22,8 @@ def _is_email_conflict(error: IntegrityError) -> bool:
         and len(original.args) >= 2
         and original.args[0] == 1062
         and isinstance(original.args[1], str)
-        and re.search(r"for key ['`](?:users\.)?uq_users_email['`]\s*$", original.args[1]) is not None
+        and re.search(r"for key ['`](?:users\.)?uq_users_email['`]\s*$", original.args[1])
+        is not None
     )
 
 
@@ -42,9 +43,14 @@ def register_user(
         # MySQL DATETIME(6) 不存时区，按项目约定写入无时区的 UTC 值。
         now = datetime.now(UTC).replace(tzinfo=None)
         user = User(
-            email=str(request.email), password_hash=password_hash,
-            display_name=request.display_name, status="ACTIVE", system_role="USER",
-            created_at=now, updated_at=now, last_login_at=None,
+            email=str(request.email),
+            password_hash=password_hash,
+            display_name=request.display_name,
+            status="ACTIVE",
+            system_role="USER",
+            created_at=now,
+            updated_at=now,
+            last_login_at=None,
         )
 
         # 查重后仍可能有另一请求抢先注册，真正的兜底是数据库唯一约束。
@@ -59,6 +65,6 @@ def register_user(
         if _is_email_conflict(error):
             raise EmailAlreadyRegisteredError() from None
         raise RegistrationUnavailableError() from None
-    except (SQLAlchemyError, PasswordHashError):
+    except SQLAlchemyError, PasswordHashError:
         # 不向调用方暴露 SQL、连接信息、原始异常或密码哈希。
         raise RegistrationUnavailableError() from None

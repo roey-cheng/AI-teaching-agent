@@ -15,6 +15,7 @@ from app.agent.input_policy import AgentInputPolicy
 from app.models import ChatSession, Message
 from app.schemas import DuplicateMessageResponse, SendMessageRequest, UserResponse
 from app.schemas._validation import format_database_id
+from app.services.agent_input import PreparedAgentInput, prepare_agent_input
 from app.services.errors import (
     IdempotencyConflictError,
     MessageSendUnavailableError,
@@ -22,7 +23,6 @@ from app.services.errors import (
     SessionNotFoundError,
 )
 from app.services.generation_registry import GenerationRegistry
-from app.services.agent_input import PreparedAgentInput, prepare_agent_input
 
 
 @dataclass(frozen=True)
@@ -36,17 +36,26 @@ class AcceptedMessage:
 
 
 def _owned_chat(session: Session, chat_id: int, user_id: int) -> ChatSession:
-    chat = session.scalar(select(ChatSession).where(
-        ChatSession.chat_session_id == chat_id, ChatSession.user_id == user_id,
-    ).with_for_update())
+    chat = session.scalar(
+        select(ChatSession)
+        .where(
+            ChatSession.chat_session_id == chat_id,
+            ChatSession.user_id == user_id,
+        )
+        .with_for_update()
+    )
     if chat is None:
         raise SessionNotFoundError()
     return chat
 
 
 def _answer_id(session: Session, question: Message) -> int | None:
-    answer = session.scalar(select(Message).where(Message.in_reply_to_message_id == question.message_id))
-    if answer is not None and (answer.chat_session_id != question.chat_session_id or answer.role != "ASSISTANT"):
+    answer = session.scalar(
+        select(Message).where(Message.in_reply_to_message_id == question.message_id)
+    )
+    if answer is not None and (
+        answer.chat_session_id != question.chat_session_id or answer.role != "ASSISTANT"
+    ):
         raise MessageSendUnavailableError()
     if (question.generation_status == "SUCCEEDED") != (answer is not None):
         raise MessageSendUnavailableError()
@@ -54,8 +63,13 @@ def _answer_id(session: Session, question: Message) -> int | None:
 
 
 def _settle_interrupted(
-    user_id: int, chat_id: int, client_key: str, attempt_id: str,
-    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
+    user_id: int,
+    chat_id: int,
+    client_key: str,
+    attempt_id: str,
+    session_factory: sessionmaker[Session],
+    registry: GenerationRegistry,
+    *,
     previous_attempt_id: str | None = None,
 ) -> None:
     """只结算本次编号；独立核对 INSERT/重试 UPDATE 的提交结果，不重发请求。
@@ -70,9 +84,14 @@ def _settle_interrupted(
             with session_factory.begin() as session:
                 # 重新锁住父会话行，等之前不确定的事务完成，再读取当前提交结果。
                 _owned_chat(session, chat_id, user_id)
-                question = session.scalar(select(Message).where(
-                    Message.chat_session_id == chat_id, Message.client_message_key == client_key,
-                ).with_for_update())
+                question = session.scalar(
+                    select(Message)
+                    .where(
+                        Message.chat_session_id == chat_id,
+                        Message.client_message_key == client_key,
+                    )
+                    .with_for_update()
+                )
                 if question is None and previous_attempt_id is not None:
                     raise MessageSendUnavailableError()
                 if question is not None:
@@ -81,13 +100,17 @@ def _settle_interrupted(
                         and question.attempt_id == previous_attempt_id
                         and question.generation_status == "FAILED"
                     )
-                    if question.role != "USER" or (question.attempt_id != attempt_id and not retry_rolled_back):
+                    if question.role != "USER" or (
+                        question.attempt_id != attempt_id and not retry_rolled_back
+                    ):
                         raise MessageSendUnavailableError()
                     _answer_id(session, question)  # 不覆盖已成功的回复，矛盾状态则保留占用待核对。
                     if question.generation_status == "RUNNING":
                         question.generation_status = "FAILED"
                         question.generation_error_code = "GENERATION_INTERRUPTED"
-                        question.generation_error_message = "Response generation was interrupted. Please try again."
+                        question.generation_error_message = (
+                            "Response generation was interrupted. Please try again."
+                        )
                         question.updated_at = datetime.now(UTC).replace(tzinfo=None)
                         session.flush()
             # 无记录=已确认未落库；有记录=最终状态已确认提交。此时才能释放。
@@ -99,8 +122,12 @@ def _settle_interrupted(
 
 @contextmanager
 def accept_user_message(
-    current_user: UserResponse, session_id: str, request: SendMessageRequest,
-    session_factory: sessionmaker[Session], registry: GenerationRegistry, *,
+    current_user: UserResponse,
+    session_id: str,
+    request: SendMessageRequest,
+    session_factory: sessionmaker[Session],
+    registry: GenerationRegistry,
+    *,
     check_new_message: Callable[[SendMessageRequest], None],
     input_policy: AgentInputPolicy,
 ) -> Iterator[AcceptedMessage | DuplicateMessageResponse]:
@@ -119,59 +146,104 @@ def accept_user_message(
     owned_attempt = None
     result = None
     try:
-        with registry.locked(chat_id) as slot:
-            with session_factory.begin() as session:
-                chat = _owned_chat(session, chat_id, user_id)
-                existing = session.scalar(select(Message).where(
+        with registry.locked(chat_id) as slot, session_factory.begin() as session:
+            chat = _owned_chat(session, chat_id, user_id)
+            existing = session.scalar(
+                select(Message).where(
                     Message.chat_session_id == chat_id,
                     Message.client_message_key == request.client_message_key,
-                ))
-                if existing is not None:
-                    if existing.role != "USER":
-                        raise MessageSendUnavailableError()
-                    if existing.content != request.content:
-                        raise IdempotencyConflictError()
-                    if existing.generation_status == "RUNNING" and slot.attempt_id != existing.attempt_id:
-                        raise MessageSendUnavailableError()
-                    result = DuplicateMessageResponse(
-                        duplicate=True, session_id=chat_id, user_message_id=existing.message_id,
-                        attempt_id=existing.attempt_id, status=existing.generation_status,
-                        assistant_message_id=_answer_id(session, existing),
+                )
+            )
+            if existing is not None:
+                if existing.role != "USER":
+                    raise MessageSendUnavailableError()
+                if existing.content != request.content:
+                    raise IdempotencyConflictError()
+                if (
+                    existing.generation_status == "RUNNING"
+                    and slot.attempt_id != existing.attempt_id
+                ):
+                    raise MessageSendUnavailableError()
+                result = DuplicateMessageResponse.model_validate(
+                    {
+                        "duplicate": True,
+                        "session_id": chat_id,
+                        "user_message_id": existing.message_id,
+                        "attempt_id": existing.attempt_id,
+                        "status": existing.generation_status,
+                        "assistant_message_id": _answer_id(session, existing),
+                    }
+                )
+            else:
+                if slot.attempt_id is not None:
+                    raise SessionBusyError()
+                orphan = session.scalar(
+                    select(Message.message_id)
+                    .where(
+                        Message.chat_session_id == chat_id,
+                        Message.generation_status == "RUNNING",
                     )
-                else:
-                    if slot.attempt_id is not None:
-                        raise SessionBusyError()
-                    orphan = session.scalar(select(Message.message_id).where(
-                        Message.chat_session_id == chat_id, Message.generation_status == "RUNNING",
-                    ).limit(1))
-                    if orphan is not None:
-                        raise MessageSendUnavailableError()
-                    prepared_input = prepare_agent_input(session, current_user, str(chat_id), request, input_policy)
-                    check_new_message(request.model_copy(deep=True))  # 重复回执和忙碌拒绝不消耗新生成额度。
-                    first_question = session.scalar(select(Message.message_id).where(
-                        Message.chat_session_id == chat_id, Message.role == "USER",
-                    ).limit(1)) is None
-                    owned_attempt = str(uuid4())
-                    if not slot.claim(owned_attempt):
-                        owned_attempt = None
-                        raise SessionBusyError()
-                    now = datetime.now(UTC).replace(tzinfo=None)
-                    question = Message(
-                        chat_session_id=chat_id, role="USER", content=request.content,
-                        client_message_key=request.client_message_key, attempt_id=owned_attempt,
-                        generation_status="RUNNING", created_at=now, updated_at=now,
+                    .limit(1)
+                )
+                if orphan is not None:
+                    raise MessageSendUnavailableError()
+                prepared_input = prepare_agent_input(
+                    session, current_user, str(chat_id), request, input_policy
+                )
+                check_new_message(
+                    request.model_copy(deep=True)
+                )  # 重复回执和忙碌拒绝不消耗新生成额度。
+                first_question = (
+                    session.scalar(
+                        select(Message.message_id)
+                        .where(
+                            Message.chat_session_id == chat_id,
+                            Message.role == "USER",
+                        )
+                        .limit(1)
                     )
-                    session.add(question)
-                    if first_question and not chat.title_is_manual:
-                        chat.title = request.content.strip().replace("\r\n", " ").replace("\r", " ").replace("\n", " ")[:30]
-                    chat.updated_at = now
-                    chat.last_activity_at = now
-                    session.flush()
-                    result = AcceptedMessage(str(chat_id), str(question.message_id), owned_attempt, prepared_input)
+                    is None
+                )
+                owned_attempt = str(uuid4())
+                if not slot.claim(owned_attempt):
+                    owned_attempt = None
+                    raise SessionBusyError()
+                now = datetime.now(UTC).replace(tzinfo=None)
+                question = Message(
+                    chat_session_id=chat_id,
+                    role="USER",
+                    content=request.content,
+                    client_message_key=request.client_message_key,
+                    attempt_id=owned_attempt,
+                    generation_status="RUNNING",
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(question)
+                if first_question and not chat.title_is_manual:
+                    chat.title = (
+                        request.content.strip()
+                        .replace("\r\n", " ")
+                        .replace("\r", " ")
+                        .replace("\n", " ")[:30]
+                    )
+                chat.updated_at = now
+                chat.last_activity_at = now
+                session.flush()
+                result = AcceptedMessage(
+                    str(chat_id), str(question.message_id), owned_attempt, prepared_input
+                )
     except BaseException as error:
         # 不论是 flush 失败还是提交结果不明，先独立核对，不能直接释放本地占用。
         if owned_attempt is not None:
-            _settle_interrupted(user_id, chat_id, request.client_message_key, owned_attempt, session_factory, registry)
+            _settle_interrupted(
+                user_id,
+                chat_id,
+                request.client_message_key,
+                owned_attempt,
+                session_factory,
+                registry,
+            )
         if isinstance(error, (SQLAlchemyError, ValidationError)):
             raise MessageSendUnavailableError() from None
         raise
@@ -181,4 +253,11 @@ def accept_user_message(
         yield result
     finally:
         if owned_attempt is not None:
-            _settle_interrupted(user_id, chat_id, request.client_message_key, owned_attempt, session_factory, registry)
+            _settle_interrupted(
+                user_id,
+                chat_id,
+                request.client_message_key,
+                owned_attempt,
+                session_factory,
+                registry,
+            )

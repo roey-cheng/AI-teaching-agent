@@ -1,15 +1,14 @@
 """启动核对、进程锁和 HTTP 生命周期测试；无真实数据库或模型。"""
 
 import asyncio
-from contextlib import contextmanager
-from datetime import datetime
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -24,6 +23,7 @@ from app.models import ChatSession, Message
 from app.services.errors import StartupCleanupError
 from app.services.generation_registry import GenerationRegistry
 from app.services.startup_cleanup import StartupCleanupResult, reconcile_interrupted_generations
+from testing_support import make_runtime
 
 
 class RuntimeLockTest(unittest.TestCase):
@@ -52,12 +52,22 @@ class RuntimeLockTest(unittest.TestCase):
             "except RuntimeAlreadyActiveError: print('busy')\n"
         )
         with RuntimeLock(self.path):
-            result = subprocess.run([sys.executable, "-c", code, str(self.path)], capture_output=True,
-                                    text=True, timeout=10)
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(self.path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.strip(), "busy")
-        result = subprocess.run([sys.executable, "-c", code, str(self.path)], capture_output=True,
-                                text=True, timeout=10)
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(self.path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
         self.assertEqual(result.stdout.strip(), "acquired")
 
     def test_process_crash_releases_lock_without_deleting_file(self):
@@ -66,7 +76,12 @@ class RuntimeLockTest(unittest.TestCase):
             "from app.core.runtime_lock import RuntimeLock\n"
             "lock=RuntimeLock(Path(sys.argv[1])); lock.__enter__(); os._exit(7)\n"
         )
-        result = subprocess.run([sys.executable, "-c", code, str(self.path)], capture_output=True, timeout=10)
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(self.path)],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
         self.assertEqual(result.returncode, 7)
         with RuntimeLock(self.path) as lock:
             lock.require_held()
@@ -86,30 +101,51 @@ class StartupCleanupTest(unittest.TestCase):
         self.session = self.factory.begin.return_value.__enter__.return_value
         self.registry, self.lock = GenerationRegistry(), MagicMock(spec=RuntimeLock)
         self.question = Message(
-            message_id=2, chat_session_id=1, role="USER", content="Question", attempt_id=str(uuid4()),
-            retry_of_attempt_id=str(uuid4()), client_message_key=str(uuid4()),
-            generation_status="RUNNING", created_at=datetime(2026, 10, 11),
+            message_id=2,
+            chat_session_id=1,
+            role="USER",
+            content="Question",
+            attempt_id=str(uuid4()),
+            retry_of_attempt_id=str(uuid4()),
+            client_message_key=str(uuid4()),
+            generation_status="RUNNING",
+            created_at=datetime(2026, 10, 11),
         )
         self.session.scalars.return_value.all.side_effect = [[1], [self.question], []]
         self.session.scalar.return_value = ChatSession(chat_session_id=1, user_id=1)
 
     def cleanup(self):
-        return reconcile_interrupted_generations(self.factory, self.registry, runtime_lock=self.lock)
+        return reconcile_interrupted_generations(
+            self.factory, self.registry, runtime_lock=self.lock
+        )
 
     def test_running_without_answer_is_interrupted_after_commit(self):
-        original = self.question.attempt_id, self.question.retry_of_attempt_id, self.question.created_at
+        original = (
+            self.question.attempt_id,
+            self.question.retry_of_attempt_id,
+            self.question.created_at,
+        )
         result = self.cleanup()
         self.assertEqual(result, StartupCleanupResult(interrupted=1))
         self.assertEqual(self.question.generation_status, "FAILED")
         self.assertEqual(self.question.generation_error_code, "GENERATION_INTERRUPTED")
-        self.assertEqual((self.question.attempt_id, self.question.retry_of_attempt_id, self.question.created_at), original)
+        self.assertEqual(
+            (self.question.attempt_id, self.question.retry_of_attempt_id, self.question.created_at),
+            original,
+        )
         self.factory.begin.return_value.__exit__.assert_called_once_with(None, None, None)
         self.session.add.assert_not_called()
         self.assertEqual(self.lock.require_held.call_count, 2)
 
     def test_existing_final_answer_is_preserved_and_status_restored(self):
-        answer = Message(message_id=3, chat_session_id=1, role="ASSISTANT", content="Saved answer",
-                         in_reply_to_message_id=2, created_at=datetime(2026, 10, 11))
+        answer = Message(
+            message_id=3,
+            chat_session_id=1,
+            role="ASSISTANT",
+            content="Saved answer",
+            in_reply_to_message_id=2,
+            created_at=datetime(2026, 10, 11),
+        )
         self.session.scalars.return_value.all.side_effect = [[1], [self.question], [answer]]
         self.assertEqual(self.cleanup(), StartupCleanupResult(restored_success=1))
         self.assertEqual(self.question.generation_status, "SUCCEEDED")
@@ -118,8 +154,19 @@ class StartupCleanupTest(unittest.TestCase):
 
     def test_bad_answer_relationship_or_blank_content_stops_startup(self):
         for changes in ({"chat_session_id": 99}, {"content": "  "}, {"role": "USER"}):
-            answer = Message(**(dict(message_id=3, chat_session_id=1, role="ASSISTANT", content="Answer",
-                                     in_reply_to_message_id=2, created_at=datetime(2026, 10, 11)) | changes))
+            answer = Message(
+                **(
+                    {
+                        "message_id": 3,
+                        "chat_session_id": 1,
+                        "role": "ASSISTANT",
+                        "content": "Answer",
+                        "in_reply_to_message_id": 2,
+                        "created_at": datetime(2026, 10, 11),
+                    }
+                    | changes
+                )
+            )
             self.session.scalars.return_value.all.side_effect = [[1], [self.question], [answer]]
             with self.assertRaises(StartupCleanupError):
                 self.cleanup()
@@ -173,22 +220,34 @@ class RuntimeStartupTest(unittest.TestCase):
             finally:
                 calls.append("released")
 
-        with patch("app.core.runtime.check_database_ready", side_effect=lambda _: calls.append("checked")), \
-                patch("app.core.runtime.build_session_factory"), \
-                patch("app.core.runtime.reconcile_interrupted_generations",
-                      side_effect=lambda *a, **k: (calls.append("cleaned"), StartupCleanupResult())[1]):
-            with open_backend_runtime(MagicMock(), lock=lock()) as runtime:
-                calls.append("serving")
-                self.assertIsInstance(runtime.registry, GenerationRegistry)
+        with (
+            patch(
+                "app.core.runtime.check_database_ready",
+                side_effect=lambda _: calls.append("checked"),
+            ),
+            patch("app.core.runtime.build_session_factory"),
+            patch(
+                "app.core.runtime.reconcile_interrupted_generations",
+                side_effect=lambda *a, **k: (calls.append("cleaned"), StartupCleanupResult())[1],
+            ),
+            open_backend_runtime(MagicMock(), lock=lock()) as runtime,
+        ):
+            calls.append("serving")
+            assert isinstance(runtime.registry, GenerationRegistry)
         self.assertEqual(calls, ["locked", "checked", "cleaned", "serving", "released"])
 
     def test_bad_database_never_starts_and_releases_lock(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "chat.lock"
-            with patch("app.core.runtime.check_database_ready", side_effect=SQLAlchemyError("private")), \
-                    patch("app.core.runtime.reconcile_interrupted_generations") as cleanup:
-                with self.assertRaises(StartupCleanupError), open_backend_runtime(MagicMock(), lock=RuntimeLock(path)):
-                    self.fail("Must not serve")
+            with (
+                patch(
+                    "app.core.runtime.check_database_ready", side_effect=SQLAlchemyError("private")
+                ),
+                patch("app.core.runtime.reconcile_interrupted_generations") as cleanup,
+                self.assertRaises(StartupCleanupError),
+                open_backend_runtime(MagicMock(), lock=RuntimeLock(path)),
+            ):
+                self.fail("Must not serve")
             cleanup.assert_not_called()
             with RuntimeLock(path):
                 pass
@@ -197,7 +256,7 @@ class RuntimeStartupTest(unittest.TestCase):
 class WebStartupTest(unittest.TestCase):
     def test_http_only_after_startup_and_runtime_removed_at_shutdown(self):
         events, thread_ids = [], []
-        runtime = SimpleNamespace(cleanup=StartupCleanupResult(2, 1))
+        runtime = make_runtime(cleanup=StartupCleanupResult(2, 1))
 
         @contextmanager
         def scope():
@@ -208,7 +267,9 @@ class WebStartupTest(unittest.TestCase):
             finally:
                 events.append("closed")
 
-        app = create_app(runtime_factory=scope, http_settings=HTTPSettings(_env_file=None))
+        app = create_app(
+            runtime_factory=scope, http_settings=HTTPSettings.from_sources(_env_file=None)
+        )
         with TestClient(app) as client:
             self.assertEqual(events, ["started"])
             self.assertIs(app.state.runtime, runtime)
@@ -222,7 +283,9 @@ class WebStartupTest(unittest.TestCase):
             raise StartupCleanupError()
             yield  # pragma: no cover -- contextmanager 的失败进入路径。
 
-        app = create_app(runtime_factory=scope, http_settings=HTTPSettings(_env_file=None))
+        app = create_app(
+            runtime_factory=scope, http_settings=HTTPSettings.from_sources(_env_file=None)
+        )
         with self.assertRaises(StartupCleanupError), TestClient(app):
             self.fail("Must not serve")
         self.assertFalse(hasattr(app.state, "runtime"))
@@ -238,11 +301,13 @@ class WebStartupCancellationTest(unittest.IsolatedAsyncioTestCase):
             if not release.wait(5):
                 raise RuntimeError("Test release not received")
             try:
-                yield SimpleNamespace(cleanup=StartupCleanupResult())
+                yield make_runtime(cleanup=StartupCleanupResult())
             finally:
                 closed.set()
 
-        app = create_app(runtime_factory=scope, http_settings=HTTPSettings(_env_file=None))
+        app = create_app(
+            runtime_factory=scope, http_settings=HTTPSettings.from_sources(_env_file=None)
+        )
 
         async def start():
             async with app.router.lifespan_context(app):

@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas._types import DatabaseID, UTCDateTime
 
-
 MemoryType = Literal[
     "LEARNING_PREFERENCE",
     "LEARNING_GOAL",

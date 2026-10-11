@@ -15,7 +15,8 @@ session_cookie = APIKeyCookie(name=COOKIE_NAME, auto_error=False)
 
 
 async def require_current_user(
-    request: Request, token: Annotated[str | None, Security(session_cookie)],
+    request: Request,
+    token: Annotated[str | None, Security(session_cookie)],
 ) -> UserResponse:
     # auto_error=False：统一由现有业务返回 UNAUTHENTICATED，不用框架默认报错。
     secret = SecretStr(token) if token else None

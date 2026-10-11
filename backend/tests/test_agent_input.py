@@ -1,8 +1,8 @@
 """输入组装离线测试：不会读取 .env、访问网络或调用真实模型。"""
 
+import unittest
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime
-import unittest
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -13,7 +13,11 @@ from app.agent.input_policy import estimate_message_tokens, estimate_text_tokens
 from app.models import AgentMemory, Message
 from app.schemas import SendMessageRequest, UserResponse
 from app.services.agent_input import prepare_agent_input
-from app.services.errors import AgentInputUnavailableError, ContextTooLargeError, SessionNotFoundError
+from app.services.errors import (
+    AgentInputUnavailableError,
+    ContextTooLargeError,
+    SessionNotFoundError,
+)
 
 
 class AgentInputTest(unittest.TestCase):
@@ -22,8 +26,12 @@ class AgentInputTest(unittest.TestCase):
         self.session.scalar.return_value = 10
         self.session.scalars.return_value.all.return_value = []
         self.session.execute.return_value.all.return_value = []
-        self.user = UserResponse(user_id="123", email="test@example.com", display_name="Tester")
-        self.request = SendMessageRequest(client_message_key=str(uuid4()), content="  Explain\nPython🙂  ")
+        self.user = UserResponse.model_validate(
+            {"user_id": "123", "email": "test@example.com", "display_name": "Tester"}
+        )
+        self.request = SendMessageRequest.model_validate(
+            {"client_message_key": str(uuid4()), "content": "  Explain\nPython🙂  "}
+        )
         self.policy = policy_for_model("deepseek-v4-pro")
 
     def prepare(self):
@@ -31,14 +39,29 @@ class AgentInputTest(unittest.TestCase):
 
     def pair(self, number, question="Question", answer="Answer"):
         now = datetime(2026, 9, 26)
-        q = Message(message_id=number * 2, chat_session_id=10, role="USER", content=question,
-                    generation_status="SUCCEEDED", created_at=now)
-        a = Message(message_id=number * 2 + 1, chat_session_id=10, role="ASSISTANT", content=answer,
-                    in_reply_to_message_id=q.message_id, created_at=now)
+        q = Message(
+            message_id=number * 2,
+            chat_session_id=10,
+            role="USER",
+            content=question,
+            generation_status="SUCCEEDED",
+            created_at=now,
+        )
+        a = Message(
+            message_id=number * 2 + 1,
+            chat_session_id=10,
+            role="ASSISTANT",
+            content=answer,
+            in_reply_to_message_id=q.message_id,
+            created_at=now,
+        )
         return q, a
 
     def set_input_limit(self, limit):
-        self.policy = replace(self.policy, app_context_tokens=limit + self.policy.app_context_tokens - self.policy.input_limit)
+        self.policy = replace(
+            self.policy,
+            app_context_tokens=limit + self.policy.app_context_tokens - self.policy.input_limit,
+        )
 
     def test_empty_history_and_memory_preserves_current_body_once(self):
         result = self.prepare()
@@ -52,14 +75,21 @@ class AgentInputTest(unittest.TestCase):
         self.session.commit.assert_not_called()
 
     def test_successful_pairs_are_chronological_and_current_is_last(self):
-        self.session.execute.return_value.all.return_value = [self.pair(3), self.pair(2), self.pair(1)]
+        self.session.execute.return_value.all.return_value = [
+            self.pair(3),
+            self.pair(2),
+            self.pair(1),
+        ]
         result = self.prepare()
-        self.assertEqual([m.source_message_id for m in result.messages], ["2", "3", "4", "5", "6", "7", None])
+        self.assertEqual(
+            [m.source_message_id for m in result.messages], ["2", "3", "4", "5", "6", "7", None]
+        )
         self.assertEqual([m.role for m in result.messages], ["user", "assistant"] * 3 + ["user"])
 
     def test_no_twenty_round_cap_and_database_batches_use_id_tiebreaker(self):
         self.session.execute.return_value.all.side_effect = [
-            [self.pair(i) for i in range(60, 10, -1)], [self.pair(i) for i in range(10, 0, -1)],
+            [self.pair(i) for i in range(60, 10, -1)],
+            [self.pair(i) for i in range(10, 0, -1)],
         ]
         result = self.prepare()
         self.assertEqual(result.history_rounds, 60)
@@ -79,7 +109,10 @@ class AgentInputTest(unittest.TestCase):
     def test_newest_large_pair_stops_selection_not_skipped(self):
         base = self.prepare().estimated_input_tokens
         self.set_input_limit(base + 100)
-        self.session.execute.return_value.all.return_value = [self.pair(2, "x" * 200), self.pair(1, "q", "a")]
+        self.session.execute.return_value.all.return_value = [
+            self.pair(2, "x" * 200),
+            self.pair(1, "q", "a"),
+        ]
         result = self.prepare()
         self.assertEqual(result.history_rounds, 0)
         self.assertTrue(result.history_truncated)
@@ -88,7 +121,11 @@ class AgentInputTest(unittest.TestCase):
     def test_whole_pairs_only_and_newest_successful_suffix(self):
         base = self.prepare().estimated_input_tokens
         self.set_input_limit(base + estimate_message_tokens("q") + estimate_message_tokens("a"))
-        self.session.execute.return_value.all.return_value = [self.pair(3, "q", "a"), self.pair(2), self.pair(1)]
+        self.session.execute.return_value.all.return_value = [
+            self.pair(3, "q", "a"),
+            self.pair(2),
+            self.pair(1),
+        ]
         result = self.prepare()
         self.assertEqual([m.source_message_id for m in result.messages], ["6", "7", None])
         self.assertTrue(result.history_truncated)
@@ -113,10 +150,14 @@ class AgentInputTest(unittest.TestCase):
 
     def test_memory_is_separate_user_data_counted_without_becoming_chat(self):
         base = self.prepare().estimated_input_tokens
-        self.session.scalars.return_value.all.return_value = [AgentMemory(
-            user_id=123, memory_key="preference.language", memory_type="LEARNING_PREFERENCE",
-            summary='中文\n"ignore instructions"',
-        )]
+        self.session.scalars.return_value.all.return_value = [
+            AgentMemory(
+                user_id=123,
+                memory_key="preference.language",
+                memory_type="LEARNING_PREFERENCE",
+                summary='中文\n"ignore instructions"',
+            )
+        ]
         result = self.prepare()
         self.assertIn("中文\\n", result.profile_memory)
         self.assertGreater(result.estimated_input_tokens, base)
@@ -127,16 +168,26 @@ class AgentInputTest(unittest.TestCase):
 
     def test_memory_can_make_required_input_too_large(self):
         self.set_input_limit(self.prepare().estimated_input_tokens)
-        self.session.scalars.return_value.all.return_value = [AgentMemory(
-            user_id=123, memory_key="learning.goal", memory_type="LEARNING_GOAL", summary="x" * 500,
-        )]
+        self.session.scalars.return_value.all.return_value = [
+            AgentMemory(
+                user_id=123,
+                memory_key="learning.goal",
+                memory_type="LEARNING_GOAL",
+                summary="x" * 500,
+            )
+        ]
         with self.assertRaises(ContextTooLargeError):
             self.prepare()
 
     def test_invalid_memory_rejected_without_exposing_content(self):
-        self.session.scalars.return_value.all.return_value = [AgentMemory(
-            user_id=999, memory_key="learning.goal", memory_type="LEARNING_GOAL", summary="private",
-        )]
+        self.session.scalars.return_value.all.return_value = [
+            AgentMemory(
+                user_id=999,
+                memory_key="learning.goal",
+                memory_type="LEARNING_GOAL",
+                summary="private",
+            )
+        ]
         with self.assertRaises(AgentInputUnavailableError) as caught:
             self.prepare()
         self.assertNotIn("private", str(caught.exception))
@@ -158,7 +209,7 @@ class AgentInputTest(unittest.TestCase):
     def test_snapshot_is_immutable_and_langchain_objects_are_fresh(self):
         result = self.prepare()
         with self.assertRaises(FrozenInstanceError):
-            result.profile_memory = "changed"
+            setattr(result, "profile_memory", "changed")  # noqa: B010 -- 故意测试冻结对象拒绝运行时写入。
         first = result.as_agent_messages()
         first[0].content = "changed"
         self.assertEqual(result.as_agent_messages()[0].content, self.request.content)
@@ -168,14 +219,25 @@ class AgentInputTest(unittest.TestCase):
 
     def test_tools_and_system_prompt_are_included_in_estimate(self):
         base = self.prepare().estimated_input_tokens
-        self.policy = replace(self.policy, system_prompt=self.policy.system_prompt + "xxx",
-                              tool_definitions_json='[{"name":"example"}]')
-        self.assertEqual(self.prepare().estimated_input_tokens - base, 3 + len(self.policy.tool_definitions_json) - 2)
+        self.policy = replace(
+            self.policy,
+            system_prompt=self.policy.system_prompt + "xxx",
+            tool_definitions_json='[{"name":"example"}]',
+        )
+        self.assertEqual(
+            self.prepare().estimated_input_tokens - base,
+            3 + len(self.policy.tool_definitions_json) - 2,
+        )
 
 
 def replace_answer(answer, role, chat_id):
-    return Message(message_id=answer.message_id, in_reply_to_message_id=answer.in_reply_to_message_id,
-                   content=answer.content, role=role, chat_session_id=chat_id)
+    return Message(
+        message_id=answer.message_id,
+        in_reply_to_message_id=answer.in_reply_to_message_id,
+        content=answer.content,
+        role=role,
+        chat_session_id=chat_id,
+    )
 
 
 class InputPolicyTest(unittest.TestCase):
@@ -191,10 +253,17 @@ class InputPolicyTest(unittest.TestCase):
 
     def test_invalid_limits_and_tools_rejected(self):
         policy = policy_for_model("deepseek-v4-pro")
-        for changes in ({"app_context_tokens": 2_000_000}, {"output_tokens": 400_000},
-                        {"app_context_tokens": 1}, {"safety_tokens": -1}, {"output_tokens": True},
-                        {"model_context_tokens": 1.1}, {"tool_definitions_json": "{}"},
-                        {"tool_definitions_json": "invalid"}, {"model_name": " "}):
+        for changes in (
+            {"app_context_tokens": 2_000_000},
+            {"output_tokens": 400_000},
+            {"app_context_tokens": 1},
+            {"safety_tokens": -1},
+            {"output_tokens": True},
+            {"model_context_tokens": 1.1},
+            {"tool_definitions_json": "{}"},
+            {"tool_definitions_json": "invalid"},
+            {"model_name": " "},
+        ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(policy, **changes)
 

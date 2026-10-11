@@ -1,7 +1,7 @@
 import os
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -22,23 +22,34 @@ class DatabaseSettingsTest(unittest.TestCase):
                 "DB_USER=test_user\nDB_PASSWORD='fake$pass#123'\nAPP_ENV=development\n",
                 encoding="utf-8",
             )
-            settings = DatabaseSettings(_env_file=env_file)
+            settings = DatabaseSettings.from_sources(_env_file=env_file)
             self.assertEqual(settings.name, "test_db")
             self.assertEqual(settings.port, 3306)
             self.assertEqual(settings.password.get_secret_value(), "fake$pass#123")
             self.assertNotIn("fake$pass#123", repr(settings))
             with patch.dict(os.environ, {"DB_PORT": "3307"}):
-                self.assertEqual(DatabaseSettings(_env_file=env_file).port, 3307)
+                self.assertEqual(DatabaseSettings.from_sources(_env_file=env_file).port, 3307)
 
     def test_missing_or_blank_password_is_rejected(self):
         with patch.dict(os.environ, {}, clear=True):
             for password_fields in ({}, {"password": ""}, {"password": "   "}):
-                with self.subTest(password_fields=password_fields), self.assertRaises(ValidationError):
-                    DatabaseSettings(_env_file=None, name="test_db", user="test_user", **password_fields)
+                with (
+                    self.subTest(password_fields=password_fields),
+                    self.assertRaises(ValidationError),
+                ):
+                    DatabaseSettings.from_sources(
+                        _env_file=None, name="test_db", user="test_user", **password_fields
+                    )
 
     def test_invalid_port_is_rejected_without_showing_secret(self):
         with patch.dict(os.environ, {}, clear=True):
             for port in (0, 65536, "not-a-port"):
                 with self.subTest(port=port), self.assertRaises(ValidationError) as captured:
-                    DatabaseSettings(_env_file=None, name="test_db", user="test_user", password="fake-secret", port=port)
+                    DatabaseSettings.from_sources(
+                        _env_file=None,
+                        name="test_db",
+                        user="test_user",
+                        password="fake-secret",
+                        port=port,
+                    )
                 self.assertNotIn("fake-secret", str(captured.exception))

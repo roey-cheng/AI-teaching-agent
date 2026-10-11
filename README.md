@@ -58,6 +58,8 @@ uv run python -m app.cli.chat
 
 ## 启动网页
 
+需要临时分享给老师时，见[临时公网演示](docs/temporary-demo-deployment-zh.md)：通过免费 HTTPS 隧道访问本机的正式构建页面，电脑需持续开机联网。
+
 先启动 MySQL 并确认迁移已完成、后端 `DB_*` 已配置，停止本项目终端聊天。FastAPI 现在启动就会核对数据库和清理残留状态，失败则不接受请求；清理不删除聊天、不调用模型。只使用单进程，不关闭 lifespan 或配置多个 worker。
 
 在两个终端分别运行（均从项目根目录开始）：
