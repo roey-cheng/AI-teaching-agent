@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.passwords import PasswordHashError, hash_password
 from app.db.session import build_session_factory
-from app.models import AgentMemory, AuthSession, ChatSession, Message, User
+from app.models import AgentMemory, AuthSession, ChatSession, GenerationAttempt, Message, User
 from app.schemas import RegisterRequest, RegisterResponse
 from app.services.auth import register_user
 from app.services.errors import EmailAlreadyRegisteredError, RegistrationUnavailableError
@@ -64,7 +64,7 @@ class RegistrationMySQLTest(unittest.TestCase):
                 PasswordHasher().verify(row.password_hash, self.request.password.get_secret_value())
             )
             self.assertNotIn(row.password_hash, response.model_dump_json())
-            for model in (AuthSession, ChatSession, Message, AgentMemory):
+            for model in (AuthSession, ChatSession, Message, AgentMemory, GenerationAttempt):
                 self.assertEqual(session.scalar(select(func.count()).select_from(model)), 0)
 
     def test_normalized_duplicate_is_rejected_and_sessions_remain_usable(self):

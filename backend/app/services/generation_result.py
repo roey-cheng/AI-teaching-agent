@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.models import Message
 from app.schemas import AssistantMessageResponse, GenerationError
 from app.services.errors import MessageSendUnavailableError
+from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.message_submission import AcceptedMessage, _owned_chat
 
@@ -41,6 +42,7 @@ def settle_generation(
     *,
     answer: str | None = None,
     error_code: str | None = None,
+    quota: GenerationQuota | None = None,
 ) -> GenerationOutcome:
     """answer 与 error_code 二选一。已成功的提交可核对返回，最终状态不会被覆盖。
 
@@ -125,6 +127,8 @@ def settle_generation(
                     question.generation_status = "SUCCEEDED"
                     question.generation_error_code = question.generation_error_message = None
                     chat.updated_at = chat.last_activity_at = now
+                    if quota is not None:
+                        quota.finish(session, accepted.attempt_id, "SUCCEEDED", now)
                     session.flush()
                     outcome = GenerationOutcome(
                         assistant=AssistantMessageResponse.model_validate(saved)
@@ -134,6 +138,8 @@ def settle_generation(
                     question.generation_status = "FAILED"
                     question.generation_error_code = error_code
                     question.generation_error_message = PUBLIC_GENERATION_ERRORS[error_code]
+                    if quota is not None:
+                        quota.finish(session, accepted.attempt_id, "FAILED", now)
                     session.flush()
                     outcome = GenerationOutcome(
                         error=GenerationError.model_validate(

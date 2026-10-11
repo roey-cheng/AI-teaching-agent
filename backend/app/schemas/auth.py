@@ -18,6 +18,8 @@ class RegisterRequest(BaseModel):
     # 不 strip、不转小写：密码中的空格和大小写也是密码的一部分。
     password: SecretStr = Field(min_length=8, max_length=128, repr=False)
     display_name: str = Field(min_length=1, max_length=100)
+    # 本地关闭 Turnstile 时允许省略；生产开启后由接口层要求并向 Cloudflare 验证。
+    turnstile_token: SecretStr | None = Field(default=None, max_length=2048, repr=False)
 
     @field_validator("email", mode="before")
     @classmethod

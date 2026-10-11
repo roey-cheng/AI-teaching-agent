@@ -85,6 +85,7 @@ def response_for(request: Request, user, session_id, body, *, message_id=None):
                 tracing_settings=configuration.tracing,
                 input_policy=configuration.policy,
                 on_event=on_event,
+                quota=runtime.quota,
             )
         return await execute_chat_retry(
             user,
@@ -98,6 +99,7 @@ def response_for(request: Request, user, session_id, body, *, message_id=None):
             tracing_settings=configuration.tracing,
             input_policy=configuration.policy,
             on_event=on_event,
+            quota=runtime.quota,
         )
 
     return ChatStreamResponse(

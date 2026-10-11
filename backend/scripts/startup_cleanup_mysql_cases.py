@@ -17,7 +17,7 @@ from app.core.runtime import open_backend_runtime
 from app.core.runtime_lock import RuntimeAlreadyActiveError, RuntimeLock
 from app.db.session import build_session_factory
 from app.main import create_app
-from app.models import AgentMemory, AuthSession, ChatSession, Message, User
+from app.models import AgentMemory, AuthSession, ChatSession, GenerationAttempt, Message, User
 from app.schemas import (
     RegisterRequest,
     RetryMessageRequest,
@@ -67,6 +67,9 @@ class StartupCleanupMySQLTest(unittest.TestCase):
         # 仅删除本测试创建的两段对话及账号，避免刻意构造的坏数据污染其他验收。
         chat_ids = [int(self.chat.session_id), int(self.other_chat.session_id)]
         with self.factory.begin() as session:
+            session.execute(
+                delete(GenerationAttempt).where(GenerationAttempt.user_id == int(self.user.user_id))
+            )
             session.execute(
                 delete(Message).where(
                     Message.chat_session_id.in_(chat_ids), Message.role == "ASSISTANT"
@@ -333,7 +336,19 @@ class StartupCleanupMySQLTest(unittest.TestCase):
             self.assertEqual(self.messages(), before)
 
     def test_real_fastapi_startup_cleans_before_serving_and_holds_runtime_lock(self):
-        self.question()
+        question = self.question()
+        with self.factory.begin() as session:
+            session.add(
+                GenerationAttempt(
+                    attempt_id=question.attempt_id,
+                    user_id=int(self.user.user_id),
+                    message_id=question.message_id,
+                    quota_date=question.created_at.date(),
+                    status="RUNNING",
+                    created_at=question.created_at,
+                    finished_at=None,
+                )
+            )
         app = create_app(
             runtime_factory=lambda: open_backend_runtime(self.engine, lock=self.lock),
             http_settings=HTTPSettings.from_sources(_env_file=None),

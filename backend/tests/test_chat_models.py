@@ -1,4 +1,4 @@
-"""离线验证五张表的结构；不连接 MySQL，不执行 SQL，不以此替代迁移验收。"""
+"""离线验证业务表结构；不连接 MySQL，不执行 SQL，不以此替代迁移验收。"""
 
 import unittest
 from collections import Counter
@@ -10,7 +10,15 @@ from sqlalchemy.orm import configure_mappers
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app.db.base import Base
-from app.models import AgentMemory, AuthSession, ChatSession, Message, User
+from app.models import (
+    AgentMemory,
+    AuthSession,
+    ChatSession,
+    GenerationAttempt,
+    GenerationControl,
+    Message,
+    User,
+)
 from app.models.agent_memory import MEMORY_TOPIC_TYPES
 from testing_support import require_type
 
@@ -25,9 +33,17 @@ def checks_for(model):
 
 
 class ChatModelsTest(unittest.TestCase):
-    def test_all_five_models_share_metadata_and_map_successfully(self):
+    def test_all_models_share_metadata_and_map_successfully(self):
         configure_mappers()
-        models = (User, AuthSession, ChatSession, Message, AgentMemory)
+        models = (
+            User,
+            AuthSession,
+            ChatSession,
+            Message,
+            AgentMemory,
+            GenerationControl,
+            GenerationAttempt,
+        )
         self.assertEqual(set(Base.metadata.tables), {model.__tablename__ for model in models})
         for model in models:
             with self.subTest(model=model.__name__):
@@ -64,6 +80,11 @@ class ChatModelsTest(unittest.TestCase):
                 "memory_id user_id memory_key memory_type summary created_at updated_at",
                 set(),
             ),
+            GenerationControl: ("control_id", set()),
+            GenerationAttempt: (
+                "attempt_id user_id message_id quota_date status created_at finished_at",
+                {"finished_at"},
+            ),
         }
         for model, (names, nullable) in definitions.items():
             with self.subTest(model=model.__name__):
@@ -82,15 +103,20 @@ class ChatModelsTest(unittest.TestCase):
             "messages.chat_session_id": "chat_sessions.chat_session_id",
             "messages.in_reply_to_message_id": "messages.message_id",
             "agent_memory.user_id": "users.user_id",
+            "generation_attempts.user_id": "users.user_id",
+            "generation_attempts.message_id": "messages.message_id",
         }
         actual = {}
         for table in Base.metadata.tables.values():
             for column in table.columns:
-                if column.primary_key or column.foreign_keys:
+                if column.foreign_keys or (
+                    column.primary_key and column.name not in {"control_id", "attempt_id"}
+                ):
                     assert isinstance(column.type, BIGINT)
                     self.assertTrue(column.type.unsigned)
                 if column.primary_key:
-                    self.assertTrue(column.autoincrement)
+                    if column.name not in {"control_id", "attempt_id"}:
+                        self.assertTrue(column.autoincrement)
                     self.assertFalse(column.nullable)
                 for foreign_key in column.foreign_keys:
                     actual[f"{table.name}.{column.name}"] = foreign_key.target_fullname
@@ -112,6 +138,8 @@ class ChatModelsTest(unittest.TestCase):
                 ("attempt_id",),
             },
             "agent_memory": {("user_id", "memory_key")},
+            "generation_control": set(),
+            "generation_attempts": set(),
         }
         for table_name, unique_columns in expected.items():
             with self.subTest(table=table_name):
@@ -132,6 +160,12 @@ class ChatModelsTest(unittest.TestCase):
                 ("generation_status", "message_id"),
             },
             "agent_memory": {("user_id", "updated_at", "memory_id")},
+            "generation_control": set(),
+            "generation_attempts": {
+                ("quota_date", "user_id", "attempt_id"),
+                ("status", "attempt_id"),
+                ("message_id", "created_at"),
+            },
         }
         for table_name, indexes in expected.items():
             table = Base.metadata.tables[table_name]

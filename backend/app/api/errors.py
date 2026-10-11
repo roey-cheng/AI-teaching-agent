@@ -62,6 +62,9 @@ def install_error_handlers(app: FastAPI):
         errors.InvalidCredentialsError: 401,
         errors.AuthenticationRequiredError: 401,
         errors.RegistrationUnavailableError: 503,
+        errors.TurnstileRequiredError: 422,
+        errors.TurnstileFailedError: 403,
+        errors.TurnstileUnavailableError: 503,
         errors.LoginUnavailableError: 503,
         errors.AuthenticationUnavailableError: 503,
         errors.LogoutUnavailableError: 503,
@@ -94,6 +97,16 @@ def install_error_handlers(app: FastAPI):
             429,
             "RATE_LIMITED",
             "Too many new generations. Please wait before sending another message.",
+            {"Retry-After": str(error.retry_after_seconds)},
+        )
+
+    @app.exception_handler(errors.GenerationQuotaError)
+    async def generation_quota(request, error):
+        return error_response(
+            request,
+            429,
+            error.code,
+            str(error),
             {"Retry-After": str(error.retry_after_seconds)},
         )
 

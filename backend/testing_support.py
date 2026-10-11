@@ -2,10 +2,17 @@
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.config import GenerationQuotaSettings
 from app.core.runtime import BackendRuntime
 from app.services.generation_limit import GenerationRateLimiter
+from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.startup_cleanup import StartupCleanupResult
+
+
+class TestDatabaseGuard:
+    def require_held(self) -> None:
+        return None
 
 
 def require_value[T](value: T | None) -> T:
@@ -27,6 +34,8 @@ def make_runtime(
     session_factory: sessionmaker[Session] | None = None,
     registry: GenerationRegistry | None = None,
     limiter: GenerationRateLimiter | None = None,
+    quota: GenerationQuota | None = None,
+    database_guard: TestDatabaseGuard | None = None,
     cleanup: StartupCleanupResult | None = None,
 ) -> BackendRuntime:
     # 未绑定引擎的 sessionmaker 不会连接开发者的数据库。
@@ -34,5 +43,7 @@ def make_runtime(
         session_factory if session_factory is not None else sessionmaker(),
         registry if registry is not None else GenerationRegistry(),
         limiter if limiter is not None else GenerationRateLimiter(),
+        quota if quota is not None else GenerationQuota(GenerationQuotaSettings()),
+        database_guard if database_guard is not None else TestDatabaseGuard(),
         cleanup if cleanup is not None else StartupCleanupResult(),
     )

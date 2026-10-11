@@ -29,6 +29,7 @@ from app.schemas import (
     StreamError,
     UserResponse,
 )
+from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import settle_generation
 from app.services.message_retry import accept_failed_message_retry
@@ -64,6 +65,7 @@ async def execute_chat_turn(
     check_new_message: Callable[[SendMessageRequest], None],
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float = 120,
+    quota: GenerationQuota | None = None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """调用方先认证，传应用共享 registry 和真实限流检查。严禁作为匿名公开模型代理。
 
@@ -79,6 +81,7 @@ async def execute_chat_turn(
         registry,
         check_new_message=check_new_message,
         input_policy=input_policy,
+        quota=quota,
     )
     return await _execute_with_scope(
         scope,
@@ -89,6 +92,7 @@ async def execute_chat_turn(
         input_policy=input_policy,
         on_event=on_event,
         timeout_seconds=timeout_seconds,
+        quota=quota,
     )
 
 
@@ -106,6 +110,7 @@ async def execute_chat_retry(
     check_retry: Callable[[RetryMessageRequest], None],
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float = 120,
+    quota: GenerationQuota | None = None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """重试原问题；不是发送同样文字的新消息，也不是重新生成成功答案。
 
@@ -121,6 +126,7 @@ async def execute_chat_retry(
         registry,
         check_retry=check_retry,
         input_policy=input_policy,
+        quota=quota,
     )
     return await _execute_with_scope(
         scope,
@@ -131,6 +137,7 @@ async def execute_chat_retry(
         input_policy=input_policy,
         on_event=on_event,
         timeout_seconds=timeout_seconds,
+        quota=quota,
     )
 
 
@@ -144,6 +151,7 @@ async def _execute_with_scope(
     input_policy: AgentInputPolicy,
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float,
+    quota: GenerationQuota | None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """两种准入之后走同一条记忆→回答→保存→清理路径，避免维护两套生成逻辑。"""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -264,14 +272,15 @@ async def _execute_with_scope(
                 if task is not None and task.cancelling():
                     raise asyncio.CancelledError
                 await progress("saving")
-                outcome = await complete_in_thread(
-                    lambda: settle_generation(
-                        accepted,
-                        session_factory,
-                        registry,
-                        answer=answer,
+
+                def save_answer():
+                    if quota is None:
+                        return settle_generation(accepted, session_factory, registry, answer=answer)
+                    return settle_generation(
+                        accepted, session_factory, registry, answer=answer, quota=quota
                     )
-                )
+
+                outcome = await complete_in_thread(save_answer)
         except asyncio.CancelledError, EventDeliveryError:
             # finally 退出准入作用域：核对已提交成功的回复，否则标中断，不再发送事件。
             raise
@@ -281,15 +290,16 @@ async def _execute_with_scope(
                 if isinstance(error, (TimeoutError, APITimeoutError))
                 else "MODEL_REQUEST_FAILED"
             )
+
             # 新事务核对提交结果：如果成功提交但连接返回失败，保留成功，不写相反状态。
-            outcome = await complete_in_thread(
-                lambda: settle_generation(
-                    accepted,
-                    session_factory,
-                    registry,
-                    error_code=code,
+            def save_error():
+                if quota is None:
+                    return settle_generation(accepted, session_factory, registry, error_code=code)
+                return settle_generation(
+                    accepted, session_factory, registry, error_code=code, quota=quota
                 )
-            )
+
+            outcome = await complete_in_thread(save_error)
     finally:
         if entered:
             # 先关闭模型流/跟踪并等在途线程，再核对数据库最终状态并匹配释放占用。

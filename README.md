@@ -39,7 +39,7 @@ AI-teaching-agent/
 
 后端已验证 Python 3.14.7、FastAPI、Uvicorn、Deep Agents 和配置库可正常使用；安装与检查命令见 [后端说明](backend/README.md)。
 
-2026-10-11：表模型、迁移、API Schema、业务服务、正式 Deep Agents、记忆阶段、执行器及全部 11 个业务 HTTP 接口已接通，包含发送消息/失败重试 SSE。React 第一版业务页面也已完成，覆盖账号、会话侧栏、历史、Markdown、流式进度/思考/回答、失败重试和 Profile Memory，并具有桌面及手机布局。后端已有 437 项离线测试、153 项隔离 MySQL 测试；前端另有 SSE 分片自动测试、类型检查和生产构建。真实模型的完整网页聊天仍需由开发者手动验收，会消耗模型额度。终端重试命令和运行中长期故障自动恢复仍待完成。
+2026-10-12：表模型、迁移、API Schema、业务服务、正式 Deep Agents、记忆阶段、执行器及全部 11 个业务 HTTP 接口已接通，包含发送消息/失败重试 SSE。React 第一版业务页面也已完成。部署准备新增 Pages 同源代理、Turnstile、可信代理校验、MySQL 持久额度、数据库运行锁和 `/ready`；后端 455 项离线测试、154 项隔离 MySQL 测试及前端 5 项测试/类型检查/生产构建已通过。真实模型的完整公网聊天仍需上线后人工验收，会消耗模型额度。
 
 手动体验真实聊天：MySQL 已启动且迁移、后端配置已准备好后，运行：
 
@@ -57,6 +57,8 @@ uv run python -m app.cli.chat
 终端探针和正式聊天执行器均支持可选 LangSmith tracing（默认关闭）：配置方法和代码位置见[LangSmith 执行跟踪](backend/README.md#langsmith-执行跟踪可选)。未发送真实 trace 验证；网页会展示后端公开的进度与思考事件，但不会展示 LangSmith 后台页面。
 
 ## 启动网页
+
+正式公网部署见 [Cloudflare Pages + Railway 部署手册](docs/cloudflare-pages-railway-deployment-zh.md)。
 
 需要临时分享给老师时，见[临时公网演示](docs/temporary-demo-deployment-zh.md)：通过免费 HTTPS 隧道访问本机的正式构建页面，电脑需持续开机联网。
 

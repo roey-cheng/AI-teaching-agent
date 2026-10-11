@@ -39,7 +39,15 @@ from terminal_chat_mysql_cases import TerminalChatMySQLTest
 from app.core.config import DatabaseSettings
 from app.db.base import Base
 from app.db.engine import build_database_engine
-from app.models import AgentMemory, AuthSession, ChatSession, Message, User
+from app.models import (
+    AgentMemory,
+    AuthSession,
+    ChatSession,
+    GenerationAttempt,
+    GenerationControl,
+    Message,
+    User,
+)
 from app.models.agent_memory import MEMORY_TOPIC_TYPES
 from testing_support import require_type, require_value
 
@@ -138,7 +146,10 @@ class MySQLMigrationTest(unittest.TestCase):
             set(inspector.get_table_names()), set(Base.metadata.tables) | {"alembic_version"}
         )
         self.assertEqual(
-            self.connection.scalar(text("SELECT version_num FROM alembic_version")), "20260925_0001"
+            self.connection.scalar(text("SELECT version_num FROM alembic_version")), "20261012_0002"
+        )
+        self.assertEqual(
+            self.connection.scalar(text("SELECT control_id FROM generation_control")), 1
         )
         for name, table in Base.metadata.tables.items():
             with self.subTest(table=name):
@@ -148,8 +159,10 @@ class MySQLMigrationTest(unittest.TestCase):
                 ddl = self.connection.exec_driver_sql(f"SHOW CREATE TABLE `{name}`").one()[1]
                 self.assertIn("ENGINE=InnoDB", ddl)
                 self.assertIn("CHARSET=utf8mb4", ddl)
-                self.assertIn("datetime(6)", ddl)
-                self.assertIn("AUTO_INCREMENT", ddl)
+                if any(column.name.endswith("_at") for column in table.columns):
+                    self.assertIn("datetime(6)", ddl)
+                if name not in {"generation_control", "generation_attempts"}:
+                    self.assertIn("AUTO_INCREMENT", ddl)
                 for constraint in table.constraints:
                     if constraint.name:
                         self.assertIn(f"`{constraint.name}`", ddl)
@@ -198,6 +211,36 @@ class MySQLMigrationTest(unittest.TestCase):
         ).one()
         self.assertEqual(chat.title, "新对话")
         self.assertFalse(chat.title_is_manual)
+
+    def test_generation_attempt_foreign_keys_and_terminal_state(self):
+        question_id = self.insert(Message, self.question())
+        attempt_id = self.connection.scalar(
+            select(Message.attempt_id).where(Message.message_id == question_id)
+        )
+        self.insert(
+            GenerationAttempt,
+            {
+                "attempt_id": attempt_id,
+                "user_id": self.user_id,
+                "message_id": question_id,
+                "quota_date": self.now.date(),
+                "status": "RUNNING",
+                "created_at": self.now,
+            },
+        )
+        self.connection.execute(
+            GenerationAttempt.__table__.update()
+            .where(GenerationAttempt.attempt_id == attempt_id)
+            .values(status="SUCCEEDED", finished_at=self.now)
+        )
+        status = self.connection.scalar(
+            select(GenerationAttempt.status).where(GenerationAttempt.attempt_id == attempt_id)
+        )
+        self.assertEqual(status, "SUCCEEDED")
+        self.rejected(
+            GenerationControl.__table__.insert().values(control_id=2),
+            3819,
+        )
 
     def test_unique_email_token_message_reply_attempt_and_memory(self):
         self.rejected(

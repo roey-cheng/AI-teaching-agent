@@ -6,6 +6,9 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.accounts import router as accounts_router
 from app.api.chat_messages import router as messages_router
@@ -14,11 +17,13 @@ from app.api.errors import RequestContextMiddleware, install_error_handlers
 from app.api.memory import router as memory_router
 from app.api.security import AccountRateLimiter
 from app.core.async_work import complete_before_cancelling, complete_in_thread
-from app.core.config import load_database_settings
+from app.core.config import load_database_settings, load_turnstile_settings
 from app.core.http_config import HTTPSettings
 from app.core.runtime import BackendRuntime, open_backend_runtime
 from app.db.engine import build_database_engine
+from app.db.runtime_guard import DatabaseRuntimeLockError
 from app.services.errors import StartupCleanupError
+from app.services.turnstile import TurnstileVerifier, TurnstileVerifierProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +46,7 @@ def create_app(
     *,
     runtime_factory: Callable[[], AbstractContextManager[BackendRuntime]] | None = None,
     http_settings: HTTPSettings | None = None,
+    turnstile_verifier: TurnstileVerifierProtocol | None = None,
 ) -> FastAPI:
     """测试可注入独立运行环境，避免访问开发者 .env 和项目数据库。"""
 
@@ -50,6 +56,9 @@ def create_app(
             http_settings if http_settings is not None else HTTPSettings.from_sources()
         )
         application.state.account_limiter = AccountRateLimiter()
+        application.state.turnstile_verifier = turnstile_verifier or TurnstileVerifier(
+            load_turnstile_settings()
+        )
         application.state.active_stream_requests = set()
         application.state.stopping = False
         scope = (runtime_factory or configured_runtime)()
@@ -101,6 +110,26 @@ def create_app(
     def health() -> dict[str, str]:
         """进程存活检查；启动已核对数据库，但本请求不检查数据库/模型持续可用性。"""
         return {"status": "ok"}
+
+    @application.get("/ready")
+    async def ready():
+        """平台就绪检查：数据库可查询，而且本进程仍持有生产运行锁。"""
+
+        if application.state.stopping or not hasattr(application.state, "runtime"):
+            return JSONResponse({"status": "not_ready"}, status_code=503)
+
+        def check():
+            runtime = application.state.runtime
+            runtime.database_guard.require_held()
+            with runtime.session_factory() as session:
+                if session.scalar(text("SELECT 1")) != 1:
+                    raise RuntimeError("Database readiness query failed")
+
+        try:
+            await complete_in_thread(check)
+        except DatabaseRuntimeLockError, SQLAlchemyError, RuntimeError:
+            return JSONResponse({"status": "not_ready"}, status_code=503)
+        return {"status": "ready"}
 
     return application
 

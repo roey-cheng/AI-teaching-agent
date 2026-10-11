@@ -62,7 +62,7 @@ uv run python -m unittest discover -s tests -q
 
 以上库还会自动安装它们所需的其他依赖，包括 LangGraph。安装了模型相关库不代表已经选定模型提供方，也不会自动调用模型。
 
-MySQL 驱动、SQLAlchemy 和 Alembic 已安装，五张表模型、迁移、API Schema、账号/会话/历史业务已有测试，用户已报告项目库建表成功。已有正式 Deep Agents、聊天执行器、终端入口、思考/进度事件、结果保存和单进程生成控制。已接记忆存取服务、独立记忆 Agent 与 `/memory`，详见“Agent 自动记忆：两阶段执行”。失败重试业务及共享执行器已实现；终端和 FastAPI 已接启动残留清理及同项目进程锁。全部 11 个业务 HTTP 接口已接通，含 Cookie、来源检查、账号/生成限流和 SSE；React 网页已接账号、会话、聊天、重试与记忆，终端 `/retry` 命令尚未接入。本次自动测试未调用真实模型或 LangSmith，也未连接或修改项目数据库。下文早期阶段记录中的“未来接口”属于当时进度，以本节及下方 HTTP/SSE 小节最新状态为准。
+MySQL 驱动、SQLAlchemy 和 Alembic 已安装；五张核心业务表外，部署准备迁移新增 `generation_control` 和 `generation_attempts`，用于跨重启的每日额度和全站并发控制。已有正式 Deep Agents、聊天执行器、终端入口、思考/进度事件、结果保存和生成控制。已接记忆存取服务、独立记忆 Agent 与 `/memory`，详见“Agent 自动记忆：两阶段执行”。失败重试业务及共享执行器已实现；终端和 FastAPI 已接启动残留清理、本机进程锁及 MySQL 运行锁。全部 11 个业务 HTTP 接口已接通，含 Cookie、来源检查、Turnstile、可信 Pages 代理、账号/生成限流和 SSE；React 网页已接账号、会话、聊天、重试与记忆。生产部署步骤见仓库根目录的 Cloudflare Pages + Railway 部署手册。下文早期阶段记录中的“未来接口”属于当时进度，以本节最新状态为准。
 
 ## 账号 HTTP 接口
 

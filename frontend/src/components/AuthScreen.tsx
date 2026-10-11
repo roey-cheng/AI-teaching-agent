@@ -6,6 +6,7 @@ import { useLanguage } from '../i18n'
 import type { User } from '../types'
 import { Icon } from './Icons'
 import { LanguageToggle } from './LanguageToggle'
+import { TurnstileWidget } from './TurnstileWidget'
 
 type Mode = 'login' | 'register'
 
@@ -17,6 +18,8 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const [turnstileReset, setTurnstileReset] = useState(0)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -24,12 +27,25 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
     setError('')
     try {
       if (mode === 'register') {
-        await accountApi.register({ display_name: displayName, email, password })
+        if (import.meta.env.VITE_TURNSTILE_SITE_KEY && !turnstileToken) {
+          setError(t('turnstileRequired'))
+          return
+        }
+        await accountApi.register({
+          display_name: displayName,
+          email,
+          password,
+          ...(turnstileToken ? { turnstile_token: turnstileToken } : {}),
+        })
       }
       const result = await accountApi.login({ email, password })
       onAuthenticated(result.user)
     } catch (caught) {
       setError(userFacingError(caught, language))
+      if (mode === 'register') {
+        setTurnstileToken('')
+        setTurnstileReset((value) => value + 1)
+      }
     } finally {
       setBusy(false)
     }
@@ -38,6 +54,7 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
   function switchMode(nextMode: Mode) {
     setMode(nextMode)
     setError('')
+    setTurnstileToken('')
   }
 
   return (
@@ -72,6 +89,13 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
               <span>{t('password')}</span>
               <input autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 8 : 1} maxLength={128} onChange={(e) => setPassword(e.target.value)} placeholder={mode === 'register' ? t('newPasswordPlaceholder') : t('passwordPlaceholder')} required type="password" value={password} />
             </label>
+            {mode === 'register' && (
+              <TurnstileWidget
+                language={language}
+                onToken={setTurnstileToken}
+                resetVersion={turnstileReset}
+              />
+            )}
             {error && <p className="form-error" role="alert">{error}</p>}
             <button className="primary-button auth-submit" disabled={busy} type="submit">
               {busy ? <span className="spinner" /> : null}

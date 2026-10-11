@@ -17,7 +17,7 @@ from app.core.runtime import open_backend_runtime
 from app.core.runtime_lock import RuntimeLock
 from app.db.session import build_session_factory
 from app.main import create_app
-from app.models import AgentMemory, AuthSession, ChatSession, Message, User
+from app.models import AgentMemory, AuthSession, ChatSession, GenerationAttempt, Message, User
 from testing_support import require_type, require_value
 
 BASE = "/api/v1/chat/sessions"
@@ -57,6 +57,9 @@ class ResourceHTTPFixture(unittest.TestCase):
         self.assertNotEqual(self.engine.url.port, 3306)
         if self.user_ids:
             with self.factory.begin() as session:
+                session.execute(
+                    delete(GenerationAttempt).where(GenerationAttempt.user_id.in_(self.user_ids))
+                )
                 chats = select(ChatSession.chat_session_id).where(
                     ChatSession.user_id.in_(self.user_ids)
                 )

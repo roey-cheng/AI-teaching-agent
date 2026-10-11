@@ -2,7 +2,7 @@
 
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 
 from app.core.config import BACKEND_ENV_FILE, EnvironmentSettings
@@ -27,6 +27,25 @@ class HTTPSettings(EnvironmentSettings):
         ]
     )
     cookie_secure: bool = False  # 本地 HTTP；部署 HTTPS 时必须设为 true。
+    require_trusted_proxy: bool = False
+    proxy_shared_secret: SecretStr | None = None
+
+    @field_validator("proxy_shared_secret", mode="before")
+    @classmethod
+    def empty_proxy_secret(cls, value):
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def validate_proxy_configuration(self):
+        if self.require_trusted_proxy and self.proxy_shared_secret is None:
+            raise ValueError("HTTP_PROXY_SHARED_SECRET is required when trusted proxy is enabled")
+        if self.proxy_shared_secret is not None:
+            raw = self.proxy_shared_secret.get_secret_value()
+            if len(raw) < 32 or any(character.isspace() for character in raw):
+                raise ValueError(
+                    "HTTP_PROXY_SHARED_SECRET must contain at least 32 non-whitespace characters"
+                )
+        return self
 
     @field_validator("allowed_origins")
     @classmethod
