@@ -125,6 +125,13 @@ export default function App() {
   }
 
   function applyStreamEvent(event: StreamEvent) {
+    if (event.type === 'agent_progress' && event.data.stage === 'memory_saved') {
+      // 记忆是否写入以后端事件为准，不让回答模型自己猜测或充当成功回执。
+      setToast(t('memorySaved'))
+    }
+    if (event.type === 'agent_progress' && event.data.stage === 'memory_unavailable') {
+      setToast(t('memoryUnavailable'))
+    }
     setLive((current) => {
       if (!current) return current
       switch (event.type) {

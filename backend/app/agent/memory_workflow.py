@@ -102,6 +102,7 @@ def build_memory_agent(settings, prepared, bound):
         max_tokens=2048,
         timeout=20,
         max_retries=0,
+        temperature=0,
         extra_body={"thinking": {"type": "disabled"}},
     )
     middleware: list[AgentMiddleware[Any, None]] = [
@@ -140,6 +141,13 @@ def with_memory_result(prepared, profile, status, topics=()):
         note = (
             "The requested memory update was rejected by the backend privacy policy. Do not claim "
             "that it was saved, and do not say that the whole system has no memory feature."
+        )
+    elif status == "needs_clarification":
+        note = (
+            "The user explicitly requested a memory save, but the backend did not receive a valid "
+            "eligible profile fact. State clearly that nothing was saved this turn and ask the user "
+            "to restate the specific enduring preference, goal, interest, or background fact. Do not "
+            "discuss internal tools, permissions, settings, or implementation details."
         )
     else:
         note = (
@@ -198,6 +206,20 @@ async def prepare_memory_for_turn(accepted, factory, registry, settings, progres
                                 content=json.dumps(
                                     {
                                         "existing_profile": prepared.profile_memory,
+                                        "explicit_memory_request": bound.explicit_request,
+                                        "recent_user_messages": [
+                                            {
+                                                "position": (
+                                                    "current"
+                                                    if index == len(bound.recent_user_messages) - 1
+                                                    else "previous"
+                                                ),
+                                                "content": content,
+                                            }
+                                            for index, content in enumerate(
+                                                bound.recent_user_messages
+                                            )
+                                        ],
                                         "current_user_message": bound.question,
                                     },
                                     ensure_ascii=False,
@@ -221,6 +243,8 @@ async def prepare_memory_for_turn(accepted, factory, registry, settings, progres
                         task = asyncio.current_task()
                         if task is not None and task.cancelling():
                             raise asyncio.CancelledError
+                if bound.status == "skipped" and bound.explicit_request:
+                    bound.status = "needs_clarification"
     except asyncio.CancelledError:
         raise
     except Exception as error:
