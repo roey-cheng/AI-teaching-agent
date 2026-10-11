@@ -126,12 +126,28 @@ def build_memory_agent(settings, prepared, bound):
 def with_memory_result(prepared, profile, status, topics=()):
     """新记忆占据更多上下文时，只移除最早的完整问答；当前问题始终保留。"""
     if status == "saved":
-        note = "Backend confirmed saving these memory topics this turn: " + ", ".join(topics) + "."
+        note = (
+            "Backend confirmed saving or updating these memory topics this turn: "
+            + ", ".join(topics)
+            + ". Tell the user the update succeeded."
+        )
     elif status == "unconfirmed":
-        note = "Memory update could not be confirmed this turn. Do not claim success or guaranteed rollback."
+        note = (
+            "Memory update could not be confirmed this turn. The backend could not confirm a new "
+            "memory was saved, and do not claim that the whole system has no memory feature."
+        )
+    elif status == "rejected":
+        note = (
+            "The requested memory update was rejected by the backend privacy policy. Do not claim "
+            "that it was saved, and do not say that the whole system has no memory feature."
+        )
     else:
         note = (
-            "No new memory save was confirmed this turn. Do not claim to have saved a new memory."
+            "No new memory save was confirmed this turn; no new memory was added or changed. "
+            "The existing profile may still contain "
+            "relevant memories, and this does not mean the profile is empty or that the whole system "
+            "has no memory feature. If the requested fact is already present, say it is already remembered. "
+            "Do not claim that a new memory was saved."
         )
     policy = replace(prepared.policy, system_prompt=prepared.policy.system_prompt + "\n" + note)
     messages = list(prepared.messages)
