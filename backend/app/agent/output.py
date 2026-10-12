@@ -25,10 +25,10 @@ class VisibleChunk:
     finish_reason: str | None = None
 
 
-def extract_visible_chunk(chunk, metadata: dict) -> VisibleChunk:
+def extract_visible_chunk(chunk, metadata: dict, *, allow_tools=False) -> VisibleChunk:
     if not isinstance(chunk, AIMessageChunk) or metadata.get("langgraph_node") != "model":
         return VisibleChunk()
-    if (
+    if not allow_tools and (
         chunk.tool_calls
         or chunk.invalid_tool_calls
         or chunk.tool_call_chunks

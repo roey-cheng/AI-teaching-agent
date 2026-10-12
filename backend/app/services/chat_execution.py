@@ -6,12 +6,13 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from uuid import uuid4
 
+from langchain_core.messages import messages_to_dict
 from openai import APITimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.factory import build_chat_agent
 from app.agent.input_policy import AgentInputPolicy
-from app.agent.memory_workflow import prepare_memory_for_turn
+from app.agent.orchestrator import TurnMemory, validate_protocol
 from app.agent.output import extract_visible_chunk, managed_agent_stream
 from app.agent.tracing import async_agent_tracing
 from app.core.async_work import complete_in_thread
@@ -29,6 +30,7 @@ from app.schemas import (
     StreamError,
     UserResponse,
 )
+from app.schemas.stream import ModelStepData
 from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import settle_generation
@@ -42,6 +44,7 @@ ChatEvent = (
     | MessageDeltaData
     | MessageDoneData
     | MessageErrorData
+    | ModelStepData
 )
 
 
@@ -167,6 +170,7 @@ async def _execute_with_scope(
 
     # __enter__ 在线程中执行。即使取消发生在提交期间，也保留清理所需的进入结果。
     entered = False
+    turn = None
 
     def enter():
         nonlocal entered
@@ -202,27 +206,37 @@ async def _execute_with_scope(
                 finish_reason = None
                 seen_reasoning = seen_answer = False
                 output_bytes = 0
+                step_bytes = 0
                 async with async_agent_tracing(tracing_settings):
-                    prepared = await prepare_memory_for_turn(
-                        accepted,
-                        session_factory,
-                        registry,
-                        model_settings,
-                        progress,
-                    )
-                    agent = build_chat_agent(model_settings, prepared)
+                    turn = TurnMemory(accepted, session_factory, registry, progress)
+                    prepared = await turn.prepare()
+                    agent = build_chat_agent(model_settings, prepared, turn)
                     await progress("agent_running")
                     stream = agent.astream(
-                        {"messages": prepared.as_agent_messages()},
+                        {"messages": turn.input_messages},
                         config={
                             "run_name": "teaching_chat",
                             "metadata": {"attempt_id": accepted.attempt_id},
                         },
-                        stream_mode="messages",
+                        stream_mode=["messages", "custom"],
                         subgraphs=False,
                     )
                     async with managed_agent_stream(stream):
-                        async for chunk, metadata in stream:
+                        async for kind, payload in stream:
+                            if kind == "custom":
+                                if not isinstance(payload, dict):
+                                    raise TypeError("Invalid model step metadata")
+                                event = ModelStepData.model_validate(
+                                    {**payload, "attempt_id": accepted.attempt_id}
+                                )
+                                if event.phase in ("start", "tool"):
+                                    step_bytes = 0
+                                    answer_parts.clear()
+                                    finish_reason = None
+                                    seen_answer = False
+                                await emit(event)
+                                continue
+                            chunk, metadata = payload
                             # 即便下游吞掉取消，也禁止继续输出/保存本次结果。
                             if deadline.expired():
                                 raise TimeoutError
@@ -231,12 +245,18 @@ async def _execute_with_scope(
                                 raise asyncio.CancelledError
                             if not isinstance(metadata, dict):
                                 raise TypeError("Invalid model stream metadata")
-                            visible = extract_visible_chunk(chunk, metadata)
+                            visible = extract_visible_chunk(chunk, metadata, allow_tools=True)
                             output_bytes += len(visible.reasoning.encode("utf-8")) + len(
                                 visible.answer.encode("utf-8")
                             )
+                            step_bytes += len(visible.reasoning.encode("utf-8")) + len(
+                                visible.answer.encode("utf-8")
+                            )
                             # 额外内存保护，不冒充精确 token 计数；模型侧额度包含思考和正文。
-                            if output_bytes > input_policy.output_tokens * 32:
+                            if (
+                                output_bytes > input_policy.output_tokens * 32 * 4
+                                or step_bytes > input_policy.output_tokens * 32
+                            ):
                                 raise ValueError("Model output exceeded the execution size limit")
                             if visible.reasoning:
                                 if not seen_reasoning:
@@ -266,6 +286,7 @@ async def _execute_with_scope(
                 answer = "".join(answer_parts)
                 if finish_reason != "stop" or not answer.strip():
                     raise ValueError("The model did not produce a complete answer")
+                validate_protocol(turn.protocol)
                 if deadline.expired():
                     raise TimeoutError
                 task = asyncio.current_task()
@@ -274,10 +295,13 @@ async def _execute_with_scope(
                 await progress("saving")
 
                 def save_answer():
-                    if quota is None:
-                        return settle_generation(accepted, session_factory, registry, answer=answer)
                     return settle_generation(
-                        accepted, session_factory, registry, answer=answer, quota=quota
+                        accepted,
+                        session_factory,
+                        registry,
+                        answer=answer,
+                        quota=quota,
+                        protocol_messages=messages_to_dict(turn.protocol),
                     )
 
                 outcome = await complete_in_thread(save_answer)
@@ -301,6 +325,8 @@ async def _execute_with_scope(
 
             outcome = await complete_in_thread(save_error)
     finally:
+        if turn is not None:
+            turn.close()
         if entered:
             # 先关闭模型流/跟踪并等在途线程，再核对数据库最终状态并匹配释放占用。
             await complete_in_thread(lambda: scope.__exit__(None, None, None))

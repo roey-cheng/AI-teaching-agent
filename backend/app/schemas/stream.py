@@ -37,6 +37,13 @@ class MessageDoneData(_EventData):
     # “回答已保存”必须由业务代码保证：事务成功提交后才能发送 done。
 
 
+class ModelStepData(_EventData):
+    event_name: ClassVar[Literal["model_step"]] = "model_step"
+    attempt_id: UUIDString
+    step: int = Field(ge=1, le=4)
+    phase: Literal["start", "tool", "final"]
+
+
 class ReasoningDeltaData(_EventData):
     """模型 API 明确返回的推理文字；仅当次展示，不保存为聊天正文。"""
 

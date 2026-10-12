@@ -146,7 +146,7 @@ class MySQLMigrationTest(unittest.TestCase):
             set(inspector.get_table_names()), set(Base.metadata.tables) | {"alembic_version"}
         )
         self.assertEqual(
-            self.connection.scalar(text("SELECT version_num FROM alembic_version")), "20261012_0002"
+            self.connection.scalar(text("SELECT version_num FROM alembic_version")), "20261012_0003"
         )
         self.assertEqual(
             self.connection.scalar(text("SELECT control_id FROM generation_control")), 1
@@ -161,7 +161,7 @@ class MySQLMigrationTest(unittest.TestCase):
                 self.assertIn("CHARSET=utf8mb4", ddl)
                 if any(column.name.endswith("_at") for column in table.columns):
                     self.assertIn("datetime(6)", ddl)
-                if name not in {"generation_control", "generation_attempts"}:
+                if any(column.autoincrement is True for column in table.columns):
                     self.assertIn("AUTO_INCREMENT", ddl)
                 for constraint in table.constraints:
                     if constraint.name:
@@ -229,7 +229,8 @@ class MySQLMigrationTest(unittest.TestCase):
             },
         )
         self.connection.execute(
-            GenerationAttempt.__table__.update()
+            require_type(GenerationAttempt.__table__, Table)
+            .update()
             .where(GenerationAttempt.attempt_id == attempt_id)
             .values(status="SUCCEEDED", finished_at=self.now)
         )
@@ -238,7 +239,7 @@ class MySQLMigrationTest(unittest.TestCase):
         )
         self.assertEqual(status, "SUCCEEDED")
         self.rejected(
-            GenerationControl.__table__.insert().values(control_id=2),
+            require_type(GenerationControl.__table__, Table).insert().values(control_id=2),
             3819,
         )
 

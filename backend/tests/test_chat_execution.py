@@ -8,7 +8,7 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk
 from test_chat_agent_factory import prepared, settings
 
 from app.core.async_work import complete_in_thread
@@ -109,18 +109,46 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
             p = patch(f"app.services.chat_execution.{path}", side_effect=replacement)
             p.start()
             self.addCleanup(p.stop)
+        owner = self
+
+        class FakeTurn:
+            def __init__(self, accepted, *args):
+                self.accepted = accepted
+                self.protocol = []
+                self.input_messages = accepted.prepared_input.as_agent_messages()
+
+            async def prepare(self):
+                return self.accepted.prepared_input
+
+            def close(self):
+                pass
+
+        class StreamAdapter:
+            def __init__(self, agent, turn):
+                self.agent, self.turn = agent, turn
+
+            async def astream(self, *args, **kwargs):
+                text, reasoning = "", ""
+                stream = self.agent.astream(*args, **kwargs)
+                try:
+                    async for chunk, metadata in stream:
+                        text += chunk.content
+                        reasoning += chunk.additional_kwargs.get("reasoning_content", "")
+                        yield "messages", (chunk, metadata)
+                    self.turn.protocol = [
+                        AIMessage(content=text, additional_kwargs={"reasoning_content": reasoning})
+                    ]
+                finally:
+                    await stream.aclose()
+
         self.build_patch = patch(
-            "app.services.chat_execution.build_chat_agent", side_effect=lambda *a: self.agent
+            "app.services.chat_execution.build_chat_agent",
+            side_effect=lambda s, p, t: StreamAdapter(owner.agent, t),
         )
         self.build = self.build_patch.start()
         self.addCleanup(self.build_patch.stop)
 
-        async def no_memory(accepted, *args):
-            return accepted.prepared_input
-
-        memory_patch = patch(
-            "app.services.chat_execution.prepare_memory_for_turn", side_effect=no_memory
-        )
+        memory_patch = patch("app.services.chat_execution.TurnMemory", FakeTurn)
         memory_patch.start()
         self.addCleanup(memory_patch.stop)
 
@@ -168,7 +196,14 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "message_done",
             ],
         )
-        self.assertEqual(self.settlements, [{"answer": "answer"}])
+        self.assertEqual(len(self.settlements), 1)
+        self.assertEqual(self.settlements[0]["answer"], "answer")
+        self.assertEqual(
+            self.settlements[0]["protocol_messages"][0]["data"]["additional_kwargs"][
+                "reasoning_content"
+            ],
+            "think",
+        )
         self.assertTrue(all(i != threading.get_ident() for i in self.worker_ids))
 
     async def test_length_missing_finish_reason_and_reasoning_only_are_failures(self):

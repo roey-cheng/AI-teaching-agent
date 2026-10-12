@@ -17,7 +17,7 @@ from app.api.errors import RequestContextMiddleware, install_error_handlers
 from app.api.memory import router as memory_router
 from app.api.security import AccountRateLimiter
 from app.core.async_work import complete_before_cancelling, complete_in_thread
-from app.core.config import load_database_settings, load_turnstile_settings
+from app.core.config import MemorySettings, load_database_settings, load_turnstile_settings
 from app.core.http_config import HTTPSettings
 from app.core.runtime import BackendRuntime, open_backend_runtime
 from app.db.engine import build_database_engine
@@ -47,6 +47,7 @@ def create_app(
     runtime_factory: Callable[[], AbstractContextManager[BackendRuntime]] | None = None,
     http_settings: HTTPSettings | None = None,
     turnstile_verifier: TurnstileVerifierProtocol | None = None,
+    memory_settings: MemorySettings | None = None,
 ) -> FastAPI:
     """测试可注入独立运行环境，避免访问开发者 .env 和项目数据库。"""
 
@@ -63,6 +64,7 @@ def create_app(
         application.state.stopping = False
         scope = (runtime_factory or configured_runtime)()
         entered = False
+        memory_task = None
 
         def enter():
             nonlocal entered
@@ -74,6 +76,13 @@ def create_app(
             # 取消也必须等数据库线程返回，再退出作用域释放进程锁。
             runtime = await complete_in_thread(enter)
             application.state.runtime = runtime
+            memory_config = (
+                memory_settings if memory_settings is not None else MemorySettings.from_sources()
+            )
+            if memory_config.background_enabled:
+                from app.agent.consolidation import memory_worker
+
+                memory_task = asyncio.create_task(memory_worker(runtime, memory_config))
             logger.info(
                 "Startup reconciliation complete: %s interrupted, %s restored successful.",
                 runtime.cleanup.interrupted,
@@ -85,6 +94,11 @@ def create_app(
             # 之后才能释放数据库资源和同项目进程锁。
             application.state.stopping = True
             try:
+                if memory_task is not None:
+                    memory_task.cancel()
+                    await complete_before_cancelling(
+                        asyncio.gather(memory_task, return_exceptions=True)
+                    )
                 streams = tuple(application.state.active_stream_requests)
                 for task in streams:
                     task.cancel()

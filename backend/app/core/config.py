@@ -180,7 +180,7 @@ def load_turnstile_settings() -> TurnstileSettings:
 
 
 class GenerationQuotaSettings(EnvironmentSettings):
-    """公开模型调用的持久化额度；一次聊天轮次最多包含两次模型请求。"""
+    """公开聊天轮次的持久化额度；每轮最多四次模型请求，后台另计日额度。"""
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_ENV_FILE,
@@ -203,3 +203,17 @@ class GenerationQuotaSettings(EnvironmentSettings):
 
 def load_generation_quota_settings() -> GenerationQuotaSettings:
     return GenerationQuotaSettings.from_sources()
+
+
+class MemorySettings(EnvironmentSettings):
+    """Independent rollout switch. Disabled until tool-loop acceptance is complete."""
+
+    model_config = SettingsConfigDict(
+        env_file=BACKEND_ENV_FILE, env_prefix="MEMORY_", extra="ignore", hide_input_in_errors=True
+    )
+    background_enabled: bool = False
+    idle_seconds: int = Field(default=600, ge=60)
+    poll_seconds: int = Field(default=15, ge=1)
+    user_daily_limit: int = Field(default=5, ge=1)
+    global_daily_limit: int = Field(default=50, ge=1)
+    timeout_seconds: int = Field(default=25, ge=1, le=120)

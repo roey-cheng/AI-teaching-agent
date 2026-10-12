@@ -216,7 +216,7 @@ class RetryExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "app.services.chat_execution.accept_failed_message_retry", side_effect=accept
             ) as admission,
             patch("app.services.chat_execution.build_chat_agent") as model,
-            patch("app.services.chat_execution.prepare_memory_for_turn") as memory,
+            patch("app.services.chat_execution.TurnMemory") as memory,
         ):
             callback = MagicMock()
             request = RetryMessageRequest.model_validate({"failed_attempt_id": str(uuid4())})

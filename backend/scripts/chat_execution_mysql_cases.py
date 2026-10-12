@@ -72,15 +72,11 @@ class ChatExecutionMySQLTest(unittest.IsolatedAsyncioTestCase):
         self.model_closed = False
 
         async def provider(_model, messages, **kwargs):
-            if kwargs.get("tools"):
-                yield ChatGenerationChunk(
-                    message=AIMessageChunk(
-                        content="No update", response_metadata={"finish_reason": "stop"}
-                    )
-                )
-                return
             self.inputs.append(messages)
-            self.assertFalse(kwargs.get("tools"))
+            self.assertEqual(
+                {tool["function"]["name"] for tool in kwargs["tools"]},
+                {"read_profile_topics", "save_profile_facts"},
+            )
             self.assertEqual(kwargs["max_tokens"], self.policy.output_tokens)
             self.started.set()
             try:

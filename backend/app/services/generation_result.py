@@ -43,6 +43,7 @@ def settle_generation(
     answer: str | None = None,
     error_code: str | None = None,
     quota: GenerationQuota | None = None,
+    protocol_messages: list | None = None,
 ) -> GenerationOutcome:
     """answer 与 error_code 二选一。已成功的提交可核对返回，最终状态不会被覆盖。
 
@@ -124,6 +125,28 @@ def settle_generation(
                         updated_at=now,
                     )
                     session.add(saved)
+                    if protocol_messages is not None:
+                        from langchain_core.messages import messages_from_dict
+
+                        from app.agent.orchestrator import validate_protocol
+                        from app.models import AgentTurnRecord
+                        from app.services.memory_tasks import touch_memory
+
+                        validate_protocol(messages_from_dict(protocol_messages))
+                        session.add(
+                            AgentTurnRecord(
+                                question_id=question.message_id,
+                                user_id=int(accepted.prepared_input.user_id),
+                                messages=protocol_messages,
+                            )
+                        )
+                        touch_memory(
+                            session,
+                            int(accepted.prepared_input.user_id),
+                            now,
+                            dirty=True,
+                            message_id=question.message_id,
+                        )
                     question.generation_status = "SUCCEEDED"
                     question.generation_error_code = question.generation_error_message = None
                     chat.updated_at = chat.last_activity_at = now

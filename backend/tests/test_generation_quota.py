@@ -26,7 +26,7 @@ class GenerationQuotaTest(unittest.TestCase):
 
     def test_admission_creates_one_persistent_running_attempt(self):
         session = MagicMock()
-        session.scalar.side_effect = [object(), 1, 1, 0]
+        session.scalar.side_effect = [object(), 1, 1, 0, 0]
         now = datetime(2026, 10, 12, 2, 0, tzinfo=UTC).replace(tzinfo=None)
         GenerationQuota(self.settings()).admit(
             session,
@@ -51,7 +51,7 @@ class GenerationQuotaTest(unittest.TestCase):
         )
         for values, expected in cases:
             session = MagicMock()
-            session.scalar.side_effect = values
+            session.scalar.side_effect = [*values, 0]
             with self.subTest(expected=expected.__name__), self.assertRaises(expected):
                 GenerationQuota(self.settings()).admit(
                     session,

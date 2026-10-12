@@ -12,10 +12,14 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from app.db.base import Base
 from app.models import (
     AgentMemory,
+    AgentTurnRecord,
     AuthSession,
     ChatSession,
     GenerationAttempt,
     GenerationControl,
+    MemoryJob,
+    MemoryState,
+    MemoryTopicRevision,
     Message,
     User,
 )
@@ -43,6 +47,10 @@ class ChatModelsTest(unittest.TestCase):
             AgentMemory,
             GenerationControl,
             GenerationAttempt,
+            AgentTurnRecord,
+            MemoryJob,
+            MemoryState,
+            MemoryTopicRevision,
         )
         self.assertEqual(set(Base.metadata.tables), {model.__tablename__ for model in models})
         for model in models:
@@ -107,15 +115,31 @@ class ChatModelsTest(unittest.TestCase):
             "generation_attempts.message_id": "messages.message_id",
         }
         actual = {}
+        expected.update(
+            {
+                "agent_turn_records.question_id": "messages.message_id",
+                "agent_turn_records.user_id": "users.user_id",
+                "memory_consolidation_state.user_id": "users.user_id",
+                "memory_consolidation_jobs.user_id": "users.user_id",
+                "memory_topic_revisions.user_id": "users.user_id",
+            }
+        )
         for table in Base.metadata.tables.values():
             for column in table.columns:
                 if column.foreign_keys or (
-                    column.primary_key and column.name not in {"control_id", "attempt_id"}
+                    column.primary_key
+                    and column.name not in {"control_id", "attempt_id", "job_id", "memory_key"}
                 ):
                     assert isinstance(column.type, BIGINT)
                     self.assertTrue(column.type.unsigned)
                 if column.primary_key:
-                    if column.name not in {"control_id", "attempt_id"}:
+                    if table.name in {
+                        "users",
+                        "auth_sessions",
+                        "chat_sessions",
+                        "messages",
+                        "agent_memory",
+                    }:
                         self.assertTrue(column.autoincrement)
                     self.assertFalse(column.nullable)
                 for foreign_key in column.foreign_keys:

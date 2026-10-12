@@ -135,6 +135,12 @@ export default function App() {
     setLive((current) => {
       if (!current) return current
       switch (event.type) {
+        case 'model_step': return {
+          ...current,
+          answer: event.data.phase === 'final' ? current.answer : '',
+          toolSteps: event.data.phase === 'tool' && current.answer
+            ? [...(current.toolSteps ?? []), current.answer] : current.toolSteps,
+        }
         case 'message_start': return { ...current, attemptId: event.data.attempt_id }
         case 'agent_progress': return { ...current, attemptId: event.data.attempt_id, stage: event.data.stage }
         case 'reasoning_delta': return { ...current, attemptId: event.data.attempt_id, reasoning: current.reasoning + event.data.text }

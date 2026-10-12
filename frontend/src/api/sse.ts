@@ -1,6 +1,7 @@
 import type { StreamEvent } from '../types'
 
 const eventNames = new Set<StreamEvent['type']>([
+  'model_step',
   'message_start',
   'agent_progress',
   'reasoning_delta',

@@ -17,7 +17,9 @@ from app.services.agent_input import PreparedAgentInput
 
 
 def build_chat_agent(
-    settings: ModelSettings, prepared_input: PreparedAgentInput
+    settings: ModelSettings,
+    prepared_input: PreparedAgentInput,
+    turn=None,
 ) -> CompiledStateGraph:
     """每次生成单独创建，不缓存用户状态；仅供已经完成身份/会话校验的后端调用。
 
@@ -37,11 +39,14 @@ def build_chat_agent(
         prepared_input.memory_path != PROFILE_MEMORY_PATH
         or json.loads(policy.tool_definitions_json) != []
     ):
-        raise ValueError("This chat agent requires the standard memory path and no model tools")
+        raise ValueError("This chat agent requires the standard memory path and server-owned tools")
 
     # 正式聊天启用 API 可见推理；输出额度由思考和正文共同使用，不自动重试。
     # 60 秒是 SDK 超时，不是整个业务总超时。终端 check.py 仍是原来的无思考探针。
-    model = ChatDeepSeek(
+    from app.agent.deepseek_protocol import ProtocolChatDeepSeek
+
+    model_class = ProtocolChatDeepSeek if turn is not None else ChatDeepSeek
+    model = model_class(
         model=settings.name,
         api_key=settings.api_key,
         base_url=settings.base_url,
@@ -56,15 +61,19 @@ def build_chat_agent(
     # 只放宽这里的状态类型；列表元素仍必须是 AgentMiddleware。
     middleware: list[AgentMiddleware[Any, None]] = [
         NoAutomaticSummary(),
-        ModelCallLimitMiddleware(run_limit=1, exit_behavior="error"),
+        ModelCallLimitMiddleware(run_limit=4 if turn else 1, exit_behavior="error"),
         ChatMemoryBudgetMiddleware(backend, policy),
     ]
+    if turn is not None:
+        from app.agent.orchestrator import OrchestratorMiddleware
+
+        middleware[-1] = OrchestratorMiddleware(backend, policy, turn)
     # 创建不是执行，不记录包含模型配置的工厂参数。真正执行时用 app.agent.tracing.agent_tracing。
     with tracing_context(enabled=False):
         agent = create_deep_agent(
             model=model,
             system_prompt=policy.system_prompt,
-            tools=[],
+            tools=turn.tools if turn else [],
             subagents=[],
             skills=None,
             memory=[PROFILE_MEMORY_PATH],
@@ -74,6 +83,6 @@ def build_chat_agent(
             store=None,
             name="teaching_chat",
         )
-    # subagents=[] 不保证框架不创建默认子 Agent；中间件双重阻止 task 等一切工具委派。
-    # 工厂只创建；chat_execution 使用 prepared_input.as_agent_messages() 真正运行。
+    # subagents=[] 不保证框架不创建默认子 Agent；中间件只开放本轮绑定的记忆工具。
+    # 工厂只创建；chat_execution 使用 TurnMemory 的完整协议历史真正运行。
     return agent

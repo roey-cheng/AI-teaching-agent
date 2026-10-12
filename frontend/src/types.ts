@@ -86,6 +86,7 @@ export type AgentStage =
   | 'memory_unavailable'
 
 export type StreamEvent =
+  | { type: 'model_step'; data: { attempt_id: string; step: number; phase: 'start' | 'tool' | 'final' } }
   | { type: 'message_start'; data: { session_id: string; user_message_id: string; attempt_id: string } }
   | { type: 'agent_progress'; data: { attempt_id: string; stage: AgentStage } }
   | { type: 'reasoning_delta'; data: { attempt_id: string; text: string } }
@@ -104,5 +105,6 @@ export type LiveGeneration = {
   stage: AgentStage | null
   reasoning: string
   answer: string
+  toolSteps?: string[]
   error: GenerationError | null
 }

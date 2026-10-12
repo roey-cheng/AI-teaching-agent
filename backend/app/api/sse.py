@@ -17,10 +17,12 @@ from app.schemas import (
     MessageStartData,
     ReasoningDeltaData,
 )
+from app.schemas.stream import ModelStepData
 from app.services.chat_execution import ChatEvent
 
 logger = logging.getLogger(__name__)
 EVENT_TYPES = (
+    ModelStepData,
     MessageStartData,
     AgentProgressData,
     ReasoningDeltaData,
