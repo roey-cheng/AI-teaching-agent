@@ -37,13 +37,6 @@ class ChatSSEMySQLTest(ResourceHTTPFixture):
 
         async def provider(_model, messages, **kwargs):
             self.calls += 1
-            if kwargs.get("tools"):
-                yield ChatGenerationChunk(
-                    message=AIMessageChunk(
-                        content="No memory update", response_metadata={"finish_reason": "stop"}
-                    )
-                )
-                return
             try:
                 if self.model_fail:
                     raise RuntimeError("private-provider-secret")

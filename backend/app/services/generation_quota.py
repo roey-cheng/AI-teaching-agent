@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import GenerationQuotaSettings
-from app.models import GenerationAttempt, GenerationControl
+from app.models import GenerationAttempt, GenerationControl, MemoryJob
 from app.services.errors import (
     GlobalConcurrencyLimitError,
     GlobalDailyQuotaExceededError,
@@ -59,12 +59,15 @@ class GenerationQuota:
             .select_from(GenerationAttempt)
             .where(GenerationAttempt.status == "RUNNING")
         )
+        background_active = session.scalar(
+            select(func.count()).select_from(MemoryJob).where(MemoryJob.status == "RUNNING")
+        )
         retry_after = _seconds_until_next_utc_day(now.replace(tzinfo=UTC))
         if int(global_used or 0) >= self.settings.global_daily_limit:
             raise GlobalDailyQuotaExceededError(retry_after)
         if int(user_used or 0) >= self.settings.user_daily_limit:
             raise UserDailyQuotaExceededError(retry_after)
-        if int(active or 0) >= self.settings.global_concurrency_limit:
+        if int(active or 0) + int(background_active or 0) >= self.settings.global_concurrency_limit:
             raise GlobalConcurrencyLimitError()
         session.add(
             GenerationAttempt(

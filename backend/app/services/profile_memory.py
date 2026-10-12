@@ -82,6 +82,8 @@ def save_profile_facts(
     facts: list[ProfileFact],
     session_factory: sessionmaker[Session],
     registry: GenerationRegistry,
+    *,
+    expected_revisions: dict | None = None,
 ) -> MemoryListResponse:
     """在有效生成的作用域内保存审核后的摘要；只返回本次涉及的记忆。
 
@@ -130,6 +132,16 @@ def save_profile_facts(
                 ):
                     raise StaleGenerationError()
                 now = datetime.now(UTC).replace(tzinfo=None)
+                if expected_revisions is not None:
+                    from app.services.memory_tasks import check_and_bump_revisions
+
+                    check_and_bump_revisions(
+                        session,
+                        user_id,
+                        keys,
+                        {key: question.message_id for key in keys},
+                        expected_revisions,
+                    )
                 # 固定顺序减少多个会话同时写多主题时的死锁机会；仍不自动重试故障。
                 statement = insert(AgentMemory).values(
                     [

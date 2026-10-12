@@ -29,6 +29,25 @@ function byteFragmentedResponse(text: string, boundaries: number[]): Response {
 }
 
 describe('readEventStream', () => {
+  it('preserves model-step boundaries around temporary tool preambles', async () => {
+    const events: StreamEvent[] = []
+    const attempt = '550e8400-e29b-41d4-a716-446655440000'
+    const response = fragmentedResponse([
+      `event: model_step\ndata: {"attempt_id":"${attempt}","step":1,"phase":"start"}\n\n`,
+      `event: message_delta\ndata: {"attempt_id":"${attempt}","text":"Checking"}\n\n`,
+      `event: model_step\ndata: {"attempt_id":"${attempt}","step":1,"phase":"tool"}\n\n`,
+      `event: model_step\ndata: {"attempt_id":"${attempt}","step":2,"phase":"start"}\n\n`,
+      `event: message_delta\ndata: {"attempt_id":"${attempt}","text":"Saved"}\n\n`,
+      `event: model_step\ndata: {"attempt_id":"${attempt}","step":2,"phase":"final"}\n\n`,
+    ])
+    await readEventStream(response, (event) => events.push(event))
+    expect(events.map((event) => event.type)).toEqual([
+      'model_step', 'message_delta', 'model_step', 'model_step', 'message_delta', 'model_step',
+    ])
+    expect(events[2]).toMatchObject({ type: 'model_step', data: { phase: 'tool', step: 1 } })
+    expect(events[5]).toMatchObject({ type: 'model_step', data: { phase: 'final', step: 2 } })
+  })
+
   it('reassembles an event split across network chunks without breaking Chinese text', async () => {
     const events: StreamEvent[] = []
     const payload = [

@@ -64,6 +64,11 @@ class EventPrinter:
             )
         elif item.event_name == "agent_progress":
             self.line(f"[Progress] {self.STAGES[item.stage]}")
+        elif item.event_name == "model_step":
+            if item.phase == "start":
+                self.line(f"[Step {item.step}] Model output (provisional until completion).")
+            elif item.phase == "tool":
+                self.line("[Tool step] The preceding text was progress, not the final answer.")
         elif isinstance(item, (ReasoningDeltaData, MessageDeltaData)):
             section = "Thinking" if item.event_name == "reasoning_delta" else "Answer"
             if self.section != section:
@@ -93,4 +98,6 @@ def print_history(terminal: Terminal, history: MessageHistoryResponse) -> None:
             terminal.write(f"[Generation] {item.generation.status}")
             if item.generation.error is not None:
                 terminal.write(f"{item.generation.error.code}: {item.generation.error.message}")
-    terminal.write("Reasoning and progress are live-only; they are not stored in chat history.")
+    terminal.write(
+        "Public chat history contains final answers only; internal provider protocol is stored separately."
+    )

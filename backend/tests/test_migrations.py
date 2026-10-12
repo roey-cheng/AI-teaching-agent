@@ -23,7 +23,7 @@ from testing_support import require_value
 
 BACKEND = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "20260925_0001"
-HEAD_REVISION = "20261012_0002"
+HEAD_REVISION = "20261012_0003"
 
 
 def make_config(output=None):
@@ -52,12 +52,14 @@ class MigrationTest(unittest.TestCase):
         self.script = ScriptDirectory.from_config(make_config())
         self.revision = self.script.get_revision(INITIAL_REVISION).module
         self.head_revision = self.script.get_revision(HEAD_REVISION).module
+        self.quota_revision = self.script.get_revision("20261012_0002").module
 
     def test_linear_revision_chain_and_no_live_model_imports(self):
         self.assertEqual(self.script.get_heads(), [HEAD_REVISION])
         self.assertIsNone(self.revision.down_revision)
-        self.assertEqual(self.head_revision.down_revision, INITIAL_REVISION)
-        for revision in (self.revision, self.head_revision):
+        self.assertEqual(self.head_revision.down_revision, "20261012_0002")
+        self.assertEqual(self.quota_revision.down_revision, INITIAL_REVISION)
+        for revision in (self.revision, self.quota_revision, self.head_revision):
             source = Path(require_value(revision.__file__)).read_text()
             tree = ast.parse(source)
             imports = []
@@ -81,7 +83,7 @@ class MigrationTest(unittest.TestCase):
             table = metadata.tables[table_name]
             return sa.Index(name, *(table.c[column] for column in columns), **options)
 
-        for revision in (self.revision, self.head_revision):
+        for revision in (self.revision, self.quota_revision, self.head_revision):
             offline = (
                 patch.object(revision.context, "is_offline_mode", return_value=True)
                 if hasattr(revision, "context")
@@ -96,7 +98,7 @@ class MigrationTest(unittest.TestCase):
                 revision.upgrade()
 
         self.assertEqual(set(metadata.tables), set(Base.metadata.tables))
-        self.assertEqual(len(created), 7)
+        self.assertEqual(len(created), 11)
         for name, table in metadata.tables.items():
             model = Base.metadata.tables[name]
             with self.subTest(table=name):
@@ -132,7 +134,7 @@ class MigrationTest(unittest.TestCase):
         sql = output.getvalue()
         for name in Base.metadata.tables:
             self.assertEqual(sql.count(f"CREATE TABLE {name} ("), 1)
-        self.assertEqual(sql.count("CREATE TABLE "), 8)  # 七张业务/控制表 + 版本表。
+        self.assertEqual(sql.count("CREATE TABLE "), 12)
         for expected in (
             "CREATE TABLE alembic_version",
             "INSERT INTO alembic_version",
@@ -156,6 +158,10 @@ class MigrationTest(unittest.TestCase):
         connect.assert_not_called()
         sql = output.getvalue()
         expected_order = [
+            "memory_topic_revisions",
+            "memory_consolidation_jobs",
+            "memory_consolidation_state",
+            "agent_turn_records",
             "generation_attempts",
             "generation_control",
             "messages",

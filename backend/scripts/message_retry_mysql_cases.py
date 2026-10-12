@@ -10,7 +10,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk
 from sqlalchemy import Engine, Table, event, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -80,7 +80,7 @@ class MessageRetryMySQLTest(unittest.IsolatedAsyncioTestCase):
         )
         self.tracing = TracingSettings.from_sources(_env_file=None, tracing=False, api_key=None)
         self.request = SendMessageRequest.model_validate(
-            {"client_message_key": str(uuid4()), "content": "以后请用中文解释"}
+            {"client_message_key": str(uuid4()), "content": "请记住：以后请用中文解释"}
         )
         self.limiter = GenerationRateLimiter()
         self.check = MagicMock(side_effect=lambda _: self.limiter.check(self.user.user_id))
@@ -89,35 +89,43 @@ class MessageRetryMySQLTest(unittest.IsolatedAsyncioTestCase):
         self.started, self.closed = asyncio.Event(), False
 
         async def provider(_model, messages, **kwargs):
-            if kwargs.get("tools"):
-                self.memory_inputs.append(messages)
-                if self.save_memory:
-                    facts = [
-                        {
-                            "memory_key": "preference.language",
-                            "summary": "喜欢中文解释",
-                            "source_quote": self.request.content,
-                        }
-                    ]
-                    yield ChatGenerationChunk(
-                        message=AIMessageChunk(
-                            content="",
-                            tool_call_chunks=[
-                                {
-                                    "name": "save_profile_facts",
-                                    "args": json.dumps({"facts": facts}, ensure_ascii=False),
-                                    "id": "memory1",
-                                    "index": 0,
-                                }
-                            ],
-                        )
-                    )
-                    reason = "tool_calls"
+            start = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+            current = messages[start:]
+            completed = {m.name for m in current if isinstance(m, ToolMessage)}
+            if self.save_memory and "save_profile_facts" not in completed:
+                if (
+                    "preference.language" in messages[0].text
+                    and "read_profile_topics" not in completed
+                ):
+                    name, args = "read_profile_topics", {"topics": ["preference.language"]}
                 else:
-                    yield ChatGenerationChunk(message=AIMessageChunk(content="No update"))
-                    reason = "stop"
+                    self.memory_inputs.append(messages)
+                    name, args = (
+                        "save_profile_facts",
+                        {
+                            "facts": [
+                                {
+                                    "memory_key": "preference.language",
+                                    "summary": "喜欢中文解释",
+                                    "source_quote": self.request.content,
+                                }
+                            ]
+                        },
+                    )
                 yield ChatGenerationChunk(
-                    message=AIMessageChunk(content="", response_metadata={"finish_reason": reason})
+                    message=AIMessageChunk(
+                        content="",
+                        additional_kwargs={"reasoning_content": "memory reasoning"},
+                        tool_call_chunks=[
+                            {
+                                "name": name,
+                                "args": json.dumps(args, ensure_ascii=False),
+                                "id": f"call-{len(current)}",
+                                "index": 0,
+                            }
+                        ],
+                        response_metadata={"finish_reason": "tool_calls"},
+                    )
                 )
                 return
             self.inputs.append(messages)
@@ -240,10 +248,13 @@ class MessageRetryMySQLTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[-1].in_reply_to_message_id, before.message_id)
         self.assertEqual(self.chat_row().title, old_chat.title)
         self.assertGreaterEqual(self.chat_row().last_activity_at, old_chat.last_activity_at)
-        self.assertEqual(
-            [m.content for m in self.inputs[0][1:]],
-            ["Earlier question", "Earlier answer", self.request.content],
-        )
+        context = self.inputs[0][1:]
+        self.assertEqual(len(context), 2)
+        self.assertTrue(all(isinstance(m, HumanMessage) for m in context))
+        self.assertIn("Untrusted legacy", context[0].text)
+        self.assertIn("Earlier question", context[0].text)
+        self.assertIn("Earlier answer", context[0].text)
+        self.assertEqual(context[-1].text, self.request.content)
         self.assertTrue(any(e.event_name == "reasoning_delta" for e in self.events))
         self.assertFalse(any("live reasoning" in r.content for r in rows))
         self.assertFalse(self.history().is_generating)
@@ -359,7 +370,7 @@ class MessageRetryMySQLTest(unittest.IsolatedAsyncioTestCase):
             result = await task
             self.assertEqual(require_type(result, MessageDoneData).event_name, "message_done")
             self.assertEqual(len(self.inputs), 1)
-            self.assertEqual(len(self.memory_inputs), 1)
+            self.assertEqual(len(self.memory_inputs), 0)
             self.assertEqual(len([e for e in self.events if e.event_name == "message_start"]), 1)
             self.check.assert_called_once()
         finally:

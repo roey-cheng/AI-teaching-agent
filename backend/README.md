@@ -4,6 +4,8 @@
 
 使用 Python + FastAPI，在 `app/` 中实现账号、聊天和 Deep Agents 等功能。应用入口为 `app/main.py`；现已接通 `GET /health` 和全部 11 个业务 HTTP 接口，包含发送消息、失败重试的 SSE。React 第一版业务页面已接入；真实供应商的完整网页聊天仍需人工验收。
 
+当前记忆架构与部署要求见 [记忆生命周期](../docs/memory-lifecycle-zh.md)：Teaching Orchestrator 同图即时读写 + 默认关闭的空闲整理。Alembic head 为 `20261012_0003`，新增四张内部表。下文按开发阶段保留的“两阶段、回答禁用工具、推理不持久化”等描述属于旧实现，不再代表正式执行器当前行为；旧 `memory_workflow.py` 留作兼容测试，不是每轮入口。
+
 ## Python 环境
 
 使用 Python 3.14 和 `uv` 管理环境。当前本机验证版本为 Python 3.14.7、uv 0.12.15。
@@ -925,6 +927,8 @@ uv run python -m unittest discover -s tests -p 'test_profile_memory.py' -v
 真实数据库验收仍用 `uv run python scripts/check_migration_mysql.py`，只操作脚本创建的临时容器。覆盖新增/更新/不重复、用户隔离、稳定排序、不同主题和同主题并发、跨会话读取、整批回滚、提交确认丢失、失效尝试拒绝。本次新增 14 项离线测试、9 项 MySQL 测试；全套共 338 项离线测试和 104 项 MySQL 测试通过，临时容器及其测试数据已清理。测试不调用模型、不修改项目库。
 
 ## Agent 自动记忆：两阶段执行
+
+本节是历史实现记录。当前主路径已由 [即时工具 + 空闲整理](../docs/memory-lifecycle-zh.md) 替代；不要依据本节配置模型调用次数或推理数据保留策略。
 
 ### 自己怎样试
 

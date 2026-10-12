@@ -34,7 +34,7 @@ def open_backend_runtime(
     engine: Engine,
     *,
     lock: AbstractContextManager[RuntimeLock] | None = None,
-    database_lock: AbstractContextManager[DatabaseRuntimeLock] | None = None,
+    database_lock: AbstractContextManager[DatabaseRuntimeGuard] | None = None,
 ) -> Iterator[BackendRuntime]:
     """引擎由调用方创建/释放；退出前调用方必须已等待所有生成和清理完成。"""
     local_guard = lock if lock is not None else RuntimeLock()
@@ -49,6 +49,9 @@ def open_backend_runtime(
             cleanup = reconcile_interrupted_generations(
                 factory, registry, runtime_lock=held_lock, quota=quota
             )
+            from app.services.memory_tasks import recover_memory_jobs
+
+            recover_memory_jobs(factory)
             held_database_lock.require_held()
             runtime = BackendRuntime(
                 factory,

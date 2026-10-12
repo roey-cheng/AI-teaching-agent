@@ -140,6 +140,10 @@ export function ChatPanel({ session, history, historyLoading, live, onMenu, onSe
                   {thinkingOpen && <div className="thinking-text">{live.reasoning}</div>}
                 </div>
               )}
+              {!!live.toolSteps?.length && <details className="thinking-card">
+                <summary>{language === 'zh' ? '处理步骤' : 'Processing steps'}</summary>
+                {live.toolSteps.map((step, index) => <div key={index}><Markdown>{step}</Markdown></div>)}
+              </details>}
               {live.answer ? <div className="assistant-message"><Markdown>{live.answer}</Markdown><span className="stream-caret" /></div> : !live.error && <div className="answer-placeholder"><i /><i /><i /></div>}
               {live.error && <div className="stream-error">{friendlyErrorMessage(live.error.code, live.error.message, language)}</div>}
             </div>

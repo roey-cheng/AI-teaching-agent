@@ -22,6 +22,8 @@ _EXPLICIT_MEMORY_REQUEST = re.compile(
     r"|(?:记住|记下|保存|存(?:一下|下来|下|到)?)\s*(?:我|这|那|它|以下|：|:)"
     r"|(?:把|将).{0,48}(?:记住|记下|保存|存(?:一下|下来|下|到)?|记录|加入|写入)"
     r"|(?:存|保存|加入|写入).{0,24}(?:profile\s*memory|个人(?:资料|记忆)|长期记忆)"
+    r"|(?:更正|纠正|更新|修改).{0,24}(?:记忆|资料|偏好)"
+    r"|\b(?:correct|update|change)\b.{0,32}\b(?:memory|profile|preference)\b"
     r"|\bplease\s+remember\b|^\s*remember\b"
     r"|\b(?:can|could|would)\s+you\s+(?:please\s+)?remember\b"
     r"|\b(?:save|store|add)\b.{0,48}\b(?:this|that|it|memory|profile|about me)\b",
@@ -37,7 +39,7 @@ _SENSITIVE = re.compile(
     r"政治|党派|性生活|性取向|"
     r"\b(?:diagnos\w*|allerg\w*|medical|diabet\w*|cancer|depression|religio\w*|"
     r"christian|muslim|buddhis\w*|politic\w*|sexual\w*|passport|credit.card|bank.account)\b|"
-    r"[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d[\d ()+-]{7,}\d\b|"
+    r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d[\d ()+-]{7,}\d\b|"
     r"\b\d+\s+(?:[\w-]+\s+){0,4}(?:street|road|avenue|lane|drive|st|rd|ave)\b|"
     r"[路街巷道]\s*\d+\s*号",
     re.IGNORECASE,
@@ -129,6 +131,7 @@ class BoundMemoryTool:
         self.called = False
         self.status = "skipped"
         self.saved_topics: tuple[str, ...] = ()
+        self.expected_revisions: dict | None = None
         self.question = accepted.prepared_input.messages[-1].content
         user_messages = tuple(
             item.content for item in accepted.prepared_input.messages if item.role == "user"
@@ -180,6 +183,11 @@ class BoundMemoryTool:
                 [ProfileFact(memory_key=fact.memory_key, summary=fact.summary) for fact in checked],
                 self.factory,
                 self.registry,
+                **(
+                    {"expected_revisions": self.expected_revisions}
+                    if self.expected_revisions is not None
+                    else {}
+                ),
             )
             # 在线程里记录确认结果，即使等待者此时被取消，也不会误报未写入。
             self.status = "saved"

@@ -111,10 +111,12 @@ def reconcile_interrupted_generations(
                             interrupted += 1
                         question.updated_at = now
                         if quota is not None:
+                            terminal_status = question.generation_status
+                            assert terminal_status is not None
                             quota.finish(
                                 session,
                                 question.attempt_id,
-                                question.generation_status,
+                                terminal_status,
                                 now,
                             )
                 session.flush()

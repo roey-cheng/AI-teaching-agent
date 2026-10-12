@@ -1,4 +1,4 @@
-"""正式执行器 + 两阶段 Deep Agents + 临时 MySQL；模型网络响应为替身。"""
+"""正式执行器 + 即时记忆工具循环 + 临时 MySQL；模型网络响应为替身。"""
 
 import asyncio
 import json
@@ -8,12 +8,13 @@ from typing import ClassVar
 from unittest.mock import patch
 from uuid import uuid4
 
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk
 from sqlalchemy import Engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.input_policy import policy_for_model
+from app.agent.profile_memory_tool import contains_sensitive_memory, is_explicit_memory_request
 from app.core.config import ModelSettings, TracingSettings
 from app.db.session import build_session_factory
 from app.models import AgentMemory, Message
@@ -55,7 +56,7 @@ class MemoryWorkflowMySQLTest(unittest.IsolatedAsyncioTestCase):
             _env_file=None, provider="deepseek", name=self.policy.model_name, api_key="fake-only"
         )
         self.tracing = TracingSettings.from_sources(_env_file=None, tracing=False, api_key=None)
-        self.question = "以后请用中文解释"
+        self.question = "请记住：以后请用中文解释"
         self.request = SendMessageRequest.model_validate(
             {"client_message_key": str(uuid4()), "content": self.question}
         )
@@ -70,37 +71,42 @@ class MemoryWorkflowMySQLTest(unittest.IsolatedAsyncioTestCase):
         self.answer_fails = False
 
         async def provider(model, messages, **kwargs):
-            if kwargs.get("tools"):
+            start = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+            current = messages[start:]
+            completed = {m.name for m in current if isinstance(m, ToolMessage)}
+            if (
+                self.facts
+                and is_explicit_memory_request(current[0].text)
+                and not contains_sensitive_memory(current[0].text)
+                and "save_profile_facts" not in completed
+            ):
                 self.assertEqual(
-                    [t["function"]["name"] for t in kwargs["tools"]], ["save_profile_facts"]
+                    {t["function"]["name"] for t in kwargs["tools"]},
+                    {"read_profile_topics", "save_profile_facts"},
                 )
-                self.assertEqual(model.extra_body, {"thinking": {"type": "disabled"}})
-                self.memory_inputs.append(messages)
-                if self.facts:
-                    yield ChatGenerationChunk(
-                        message=AIMessageChunk(
-                            content="",
-                            tool_call_chunks=[
-                                {
-                                    "name": "save_profile_facts",
-                                    "args": json.dumps({"facts": self.facts}, ensure_ascii=False),
-                                    "id": "memory1",
-                                    "index": 0,
-                                }
-                            ],
-                        )
-                    )
-                    yield ChatGenerationChunk(
-                        message=AIMessageChunk(
-                            content="", response_metadata={"finish_reason": "tool_calls"}
-                        )
-                    )
+                existing = [
+                    f["memory_key"] for f in self.facts if f["memory_key"] in messages[0].text
+                ]
+                if existing and "read_profile_topics" not in completed:
+                    name, args = "read_profile_topics", {"topics": existing}
                 else:
-                    yield ChatGenerationChunk(
-                        message=AIMessageChunk(
-                            content="No update", response_metadata={"finish_reason": "stop"}
-                        )
+                    name, args = "save_profile_facts", {"facts": self.facts}
+                    self.memory_inputs.append(messages)
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content="",
+                        additional_kwargs={"reasoning_content": "memory reasoning"},
+                        tool_call_chunks=[
+                            {
+                                "name": name,
+                                "args": json.dumps(args, ensure_ascii=False),
+                                "id": f"call-{len(current)}",
+                                "index": 0,
+                            }
+                        ],
+                        response_metadata={"finish_reason": "tool_calls"},
                     )
+                )
                 return
             self.assertEqual(model.extra_body, {"thinking": {"type": "enabled"}})
             self.answer_inputs.append(messages)
@@ -148,7 +154,12 @@ class MemoryWorkflowMySQLTest(unittest.IsolatedAsyncioTestCase):
         result = await self.execute()
         self.assertEqual(require_type(result, MessageDoneData).event_name, "message_done")
         self.assertEqual([row.summary for row in self.rows()], ["喜欢用中文解释"])
-        self.assertIn("喜欢用中文解释", self.answer_inputs[0][0].text)
+        self.assertTrue(
+            any(
+                "喜欢用中文解释" in m.text or "喜欢用中文解释" in str(getattr(m, "tool_calls", []))
+                for m in self.answer_inputs[0]
+            )
+        )
         self.assertEqual(len(self.memory_inputs), 1)
         self.assertTrue(any(getattr(item, "stage", None) == "memory_saved" for item in self.events))
         self.assertFalse(any("source_quote" in getattr(item, "text", "") for item in self.events))
@@ -172,7 +183,7 @@ class MemoryWorkflowMySQLTest(unittest.IsolatedAsyncioTestCase):
         await self.execute()
         first_id = self.rows()[0].memory_id
         self.request = SendMessageRequest.model_validate(
-            {"client_message_key": str(uuid4()), "content": "以后改成英文解释"}
+            {"client_message_key": str(uuid4()), "content": "请更新记忆：以后改成英文解释"}
         )
         self.facts = [
             {
@@ -224,7 +235,7 @@ class MemoryWorkflowMySQLTest(unittest.IsolatedAsyncioTestCase):
             result = await self.execute()
         self.assertEqual(require_type(result, MessageDoneData).event_name, "message_done")
         self.assertEqual(self.rows(), [])
-        self.assertIn("could not be confirmed", self.answer_inputs[-1][0].text)
+        self.assertTrue(any("could not be confirmed" in m.text for m in self.answer_inputs[-1]))
 
     async def test_other_user_cannot_list_saved_memory(self):
         await self.execute()

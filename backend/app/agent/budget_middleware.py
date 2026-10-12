@@ -4,11 +4,34 @@ import json
 
 from deepagents.middleware.memory import MemoryMiddleware, MemoryState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.input_policy import AgentInputPolicy, estimate_text_tokens
 from app.agent.memory_backend import PROFILE_MEMORY_PATH, ProfileMemoryBackend
 from app.services.errors import ContextTooLargeError
+
+
+def check_request_budget(request, tool_schemas, policy):
+    """Count injected framework prompts, full protocol and actual tool schemas together."""
+    messages = (
+        [request.system_message] if request.system_message is not None else []
+    ) + request.messages
+    serialized = json.dumps(
+        {
+            "messages": [
+                message.model_dump(mode="json", exclude_none=True) for message in messages
+            ],
+            "tools": tool_schemas,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    estimated = estimate_text_tokens(serialized) + 32 * len(messages) + 256
+    limit = policy.app_context_tokens - (
+        policy.output_tokens + policy.tool_result_reserve_tokens + policy.safety_tokens
+    )
+    if estimated > limit:
+        raise ContextTooLargeError()
 
 
 class AgentToolUseNotAllowedError(Exception):
@@ -72,28 +95,8 @@ class ChatMemoryBudgetMiddleware(MemoryMiddleware):
             tool_choice=None,
             model_settings={**request.model_settings, "max_tokens": self.policy.output_tokens},
         )
-        messages = (
-            [request.system_message] if request.system_message is not None else []
-        ) + request.messages
-        serialized = json.dumps(
-            {
-                "messages": [
-                    message.model_dump(mode="json", exclude_none=True) for message in messages
-                ],
-                "tools": [],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        estimated = estimate_text_tokens(serialized) + 32 * len(messages) + 256
-        # 框架提示已在实际 request 中，故不重复扣框架预留；输出、工具结果和余量仍保留。
-        limit = self.policy.app_context_tokens - (
-            self.policy.output_tokens
-            + self.policy.tool_result_reserve_tokens
-            + self.policy.safety_tokens
-        )
-        if estimated > limit:
-            raise ContextTooLargeError()
+        # Framework prompts are already counted; retain output/tool-result/safety reserves.
+        check_request_budget(request, [], self.policy)
         return request
 
     @staticmethod
@@ -117,5 +120,5 @@ class ChatMemoryBudgetMiddleware(MemoryMiddleware):
         # 即使模型意外输出工具调用或调用方传入待执行工具状态，也不执行任何工具。
         raise AgentToolUseNotAllowedError()
 
-    async def awrap_tool_call(self, request, handler):
+    async def awrap_tool_call(self, request, handler) -> ToolMessage:
         raise AgentToolUseNotAllowedError()
