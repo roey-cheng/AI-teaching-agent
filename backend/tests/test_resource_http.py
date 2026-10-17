@@ -131,6 +131,29 @@ class ResourceHTTPTest(unittest.TestCase):
         self.assertEqual(response.json(), {"items": []})
         service.assert_called_once_with(USER, self.runtime.session_factory)
 
+    def test_reasoning_endpoint_is_owner_scoped_and_not_cached(self):
+        from app.schemas.reasoning import MessageReasoningResponse, ReasoningStep
+
+        result = MessageReasoningResponse(
+            message_id="43", available=True, steps=[ReasoningStep(step=1, text="thought")]
+        )
+        with patch("app.api.chat_sessions.get_message_reasoning", return_value=result) as service:
+            response = self.call("GET", BASE + "/42/messages/43/reasoning")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), result.model_dump())
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        service.assert_called_once_with(USER, "42", "43", self.runtime.session_factory)
+
+    def test_reasoning_errors_are_safe_and_not_cached(self):
+        for exception, status in (
+            (errors.MessageNotFoundError, 404),
+            (errors.MessageReasoningUnavailableError, 503),
+        ):
+            with patch("app.api.chat_sessions.get_message_reasoning", side_effect=exception()):
+                self.assert_error(
+                    self.call("GET", BASE + "/42/messages/43/reasoning"), status, exception.code
+                )
+
     def test_all_five_endpoints_require_login_before_business(self):
         self.auth.side_effect = errors.AuthenticationRequiredError()
         cases = [
@@ -138,6 +161,7 @@ class ResourceHTTPTest(unittest.TestCase):
             ("GET", BASE, None),
             ("PATCH", BASE + "/42", {"title": "New"}),
             ("GET", BASE + "/42/messages", None),
+            ("GET", BASE + "/42/messages/43/reasoning", None),
             ("GET", MEMORY, None),
         ]
         for method, path, body in cases:
@@ -261,7 +285,7 @@ class ResourceHTTPTest(unittest.TestCase):
     def test_no_public_memory_writes(self):
         self.assertEqual(self.call("POST", MEMORY, json={}).status_code, 405)
 
-    def test_openapi_documents_eleven_business_operations_and_cookie_auth(self):
+    def test_openapi_documents_twelve_business_operations_and_cookie_auth(self):
         spec = self.client.get("/openapi.json").json()
         self.assertEqual(
             sum(
@@ -269,13 +293,14 @@ class ResourceHTTPTest(unittest.TestCase):
                 for path, methods in spec["paths"].items()
                 if path.startswith("/api/v1/")
             ),
-            11,
+            12,
         )
         for path, method in (
             (BASE, "post"),
             (BASE, "get"),
             (BASE + "/{session_id}", "patch"),
             (BASE + "/{session_id}/messages", "get"),
+            (BASE + "/{session_id}/messages/{message_id}/reasoning", "get"),
             (MEMORY, "get"),
         ):
             self.assertTrue(spec["paths"][path][method]["security"])

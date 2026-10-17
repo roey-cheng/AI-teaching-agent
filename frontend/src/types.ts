@@ -44,6 +44,12 @@ export type AssistantMessage = {
 
 export type Message = UserMessage | AssistantMessage
 
+export type MessageReasoning = {
+  message_id: string
+  available: boolean
+  steps: { step: number; text: string }[]
+}
+
 export type MessageHistory = {
   session_id: string
   is_generating: boolean

@@ -97,6 +97,13 @@ class MessageHistoryUnavailableError(Exception):
         super().__init__("Message history could not be confirmed. Please try again later.")
 
 
+class MessageReasoningUnavailableError(Exception):
+    code = "MESSAGE_REASONING_UNAVAILABLE"
+
+    def __init__(self) -> None:
+        super().__init__("Saved reasoning is unavailable. Please try again later.")
+
+
 class SessionBusyError(Exception):
     code = "SESSION_BUSY"
 

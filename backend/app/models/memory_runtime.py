@@ -1,4 +1,4 @@
-"""Internal memory execution data. None of these records are public chat/profile fields."""
+"""Internal execution data; only reasoning text has an owner-scoped read projection."""
 
 from datetime import date, datetime
 from typing import ClassVar

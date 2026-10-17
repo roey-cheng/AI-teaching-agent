@@ -7,6 +7,7 @@ import type { MessageKey } from '../i18n'
 import type { AgentStage, ChatSession, LiveGeneration, MessageHistory, UserMessage } from '../types'
 import { Icon } from './Icons'
 import { Markdown } from './Markdown'
+import { MessageReasoning } from './MessageReasoning'
 
 const stageLabelKeys: Record<AgentStage, MessageKey> = {
   context_ready: 'contextReady',
@@ -121,7 +122,10 @@ export function ChatPanel({ session, history, historyLoading, live, onMenu, onSe
         ) : (
           <div className="message-row assistant-row" key={message.message_id}>
             <span className="assistant-avatar"><Icon name="sparkle" /></span>
-            <div className="assistant-message"><Markdown>{message.content}</Markdown></div>
+            <div className="historical-content">
+              <MessageReasoning sessionId={history.session_id} messageId={message.message_id} />
+              <div className="assistant-message"><Markdown>{message.content}</Markdown></div>
+            </div>
           </div>
         ))}
 

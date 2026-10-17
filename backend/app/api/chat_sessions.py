@@ -1,6 +1,6 @@
 """会话与历史 HTTP 接口；没有发送消息或调用模型的逻辑。"""
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from app.api.dependencies import CurrentUser
 from app.api.security import ResourceRoute
@@ -14,8 +14,10 @@ from app.schemas import (
     SessionResponse,
 )
 from app.schemas._types import DatabaseID
+from app.schemas.reasoning import MessageReasoningResponse
 from app.services.chat_sessions import create_chat_session, list_chat_sessions, rename_chat_session
 from app.services.message_history import get_message_history
+from app.services.message_reasoning import get_message_reasoning
 
 router = APIRouter(
     prefix="/api/v1/chat/sessions",
@@ -25,6 +27,23 @@ router = APIRouter(
         status: {"model": ErrorResponse} for status in (401, 403, 404, 413, 415, 422, 500, 503)
     },
 )
+
+
+@router.get(
+    "/{session_id}/messages/{message_id}/reasoning", response_model=MessageReasoningResponse
+)
+async def reasoning(
+    session_id: DatabaseID,
+    message_id: DatabaseID,
+    request: Request,
+    response: Response,
+    user: CurrentUser,
+):
+    response.headers["Cache-Control"] = "no-store"
+    factory = request.app.state.runtime.session_factory
+    return await complete_in_thread(
+        lambda: get_message_reasoning(user, session_id, message_id, factory)
+    )
 
 
 @router.post("", response_model=SessionResponse, status_code=201)

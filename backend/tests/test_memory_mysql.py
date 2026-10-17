@@ -384,6 +384,38 @@ class MemoryMySQLTest(unittest.TestCase):
                     from app.schemas import MessageDoneData
 
                     self.assertIsInstance(result, MessageDoneData)
+                    assert isinstance(result, MessageDoneData)
+                    from app.services.message_reasoning import get_message_reasoning
+
+                    reasoning = get_message_reasoning(
+                        user,
+                        str(self.chat.chat_session_id),
+                        result.assistant_message.message_id,
+                        self.factory,
+                    )
+                    self.assertTrue(reasoning.available)
+                    self.assertEqual(len(reasoning.steps), 2 if text.startswith("请") else 1)
+                    self.assertTrue(all(s.text == "provider-reasoning" for s in reasoning.steps))
+                    from app.services.errors import MessageNotFoundError
+
+                    with self.factory.begin() as session:
+                        other_user = UserResponse.model_validate(self.make_user(session))
+                        other_chat = self.make_chat(session, self.user.user_id)
+                        other_chat_id = str(other_chat.chat_session_id)
+                    with self.assertRaises(MessageNotFoundError):
+                        get_message_reasoning(
+                            other_user,
+                            str(self.chat.chat_session_id),
+                            result.assistant_message.message_id,
+                            self.factory,
+                        )
+                    with self.assertRaises(MessageNotFoundError):
+                        get_message_reasoning(
+                            user,
+                            other_chat_id,
+                            result.assistant_message.message_id,
+                            self.factory,
+                        )
             self.assertEqual(len(model._seen), 3)
             self.assertTrue(any(isinstance(m, ToolMessage) for m in model._seen[-1]))
             self.assertTrue(any(e.event_name == "model_step" and e.phase == "tool" for e in events))
