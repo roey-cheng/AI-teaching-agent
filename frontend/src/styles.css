@@ -178,6 +178,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .thinking-card button > svg { transform: rotate(90deg); }
 .thinking-card button > svg.rotate { transform: rotate(-90deg); }
 .thinking-text { padding: 8px 12px 3px; color: #77736b; font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+.historical-content { flex: 1; min-width: 0; }
+.saved-reasoning .thinking-text { overflow-wrap: anywhere; }
+.saved-reasoning h4 { margin: 12px 0 6px; font-size: 12px; }
+.reasoning-notice { font-style: italic; }
+.reasoning-retry { border: 1px solid #dedad3; border-radius: 6px; padding: 4px 8px; background: transparent; color: inherit; cursor: pointer; }
 .answer-placeholder { display: flex; gap: 5px; padding: 8px 0; }
 .answer-placeholder i { width: 6px; height: 6px; border-radius: 50%; background: #a5a098; animation: bounce 1.2s infinite; }
 .answer-placeholder i:nth-child(2) { animation-delay: .15s; }

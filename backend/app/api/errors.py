@@ -71,6 +71,7 @@ def install_error_handlers(app: FastAPI):
         errors.SessionNotFoundError: 404,
         errors.SessionUnavailableError: 503,
         errors.MessageHistoryUnavailableError: 503,
+        errors.MessageReasoningUnavailableError: 503,
         errors.MemoryUnavailableError: 503,
         errors.MessageNotFoundError: 404,
         errors.SessionBusyError: 409,

@@ -3,6 +3,7 @@ import type {
   DuplicateMessageResponse,
   Memory,
   MessageHistory,
+  MessageReasoning,
   StreamEvent,
   User,
 } from '../types'
@@ -179,6 +180,11 @@ export const sessionApi = {
     }),
   history: (sessionId: string) =>
     requestJson<MessageHistory>(`/api/v1/chat/sessions/${sessionId}/messages`),
+  reasoning: (sessionId: string, messageId: string, signal?: AbortSignal) =>
+    requestJson<MessageReasoning>(`/api/v1/chat/sessions/${sessionId}/messages/${messageId}/reasoning`, {
+      signal,
+      cache: 'no-store',
+    }),
 }
 
 export const memoryApi = {

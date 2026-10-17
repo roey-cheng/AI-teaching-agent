@@ -4,7 +4,7 @@
 
 使用 Python + FastAPI，在 `app/` 中实现账号、聊天和 Deep Agents 等功能。应用入口为 `app/main.py`；现已接通 `GET /health` 和全部 11 个业务 HTTP 接口，包含发送消息、失败重试的 SSE。React 第一版业务页面已接入；真实供应商的完整网页聊天仍需人工验收。
 
-当前记忆架构与部署要求见 [记忆生命周期](../docs/memory-lifecycle-zh.md)：Teaching Orchestrator 同图即时读写 + 默认关闭的空闲整理。Alembic head 为 `20261012_0003`，新增四张内部表。下文按开发阶段保留的“两阶段、回答禁用工具、推理不持久化”等描述属于旧实现，不再代表正式执行器当前行为；旧 `memory_workflow.py` 留作兼容测试，不是每轮入口。
+当前记忆架构与部署要求见 [记忆生命周期](../docs/memory-lifecycle-zh.md)：Teaching Orchestrator 同图即时读写 + 默认关闭的空闲整理。Alembic head 为 `20261012_0003`，新增四张内部表。所属用户现可通过 `GET /api/v1/chat/sessions/{session_id}/messages/{message_id}/reasoning` 读取成功回答的推理文本；该接口不调用模型、不返回工具参数/结果，禁止缓存，无需新迁移。下文按开发阶段保留的“两阶段、回答禁用工具、推理不持久化”等描述属于旧实现，不再代表正式执行器当前行为；旧 `memory_workflow.py` 留作兼容测试，不是每轮入口。
 
 ## Python 环境
 
