@@ -21,6 +21,8 @@ from app.agent.deepseek_protocol import ProtocolChatDeepSeek
 from app.agent.factory import build_chat_agent
 from app.agent.orchestrator import TurnMemory, compact_profile, validate_protocol
 from app.agent.profile_memory_tool import contains_sensitive_memory, is_explicit_memory_request
+from app.agent.run_context import prepare_run_context
+from app.agent.teaching_skill import TEACHING_SKILL_PATH, load_teaching_skill
 from app.core.config import MemorySettings, TracingSettings
 from app.services.errors import ContextTooLargeError
 from app.services.memory_tasks import ClaimedMemoryJob
@@ -77,15 +79,16 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
 
     async def run_graph(self, responses):
         model = MemoryModel(responses=responses)
-        self.turn.facts = {"personal.interests": "likes reading"}
+        self.turn.facts = {"learning.goal": "likes reading"}
         self.turn.input_messages = [HumanMessage(content="Remember that I like learning")]
         with patch("app.agent.deepseek_protocol.ProtocolChatDeepSeek", return_value=model):
-            agent = build_chat_agent(
-                settings(), prepared(compact_profile(self.turn.facts)), self.turn
-            )
+            snapshot = prepared(compact_profile(self.turn.facts))
+            agent = build_chat_agent(settings(), snapshot.policy)
         events = []
         async for item in agent.astream(
-            {"messages": self.turn.input_messages}, stream_mode=["messages", "custom"]
+            {"messages": self.turn.input_messages},
+            stream_mode=["messages", "custom"],
+            context=prepare_run_context(snapshot, self.turn),
         ):
             events.append(item)
         return model, events
@@ -96,21 +99,88 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.turn.protocol), 1)
         validate_protocol(self.turn.protocol)
         self.assertEqual([v["phase"] for k, v in events if k == "custom"], ["start", "final"])
-        self.assertEqual(set(model._tools[0]), {"save_profile_facts", "read_profile_topics"})
+        self.assertEqual(
+            set(model._tools[0]), {"save_profile_facts", "read_profile_topics", "read_file"}
+        )
+
+    async def test_skill_is_discovered_and_read_on_demand_in_real_graph(self):
+        model, _ = await self.run_graph(
+            [
+                answer(tool="read_file", args={"file_path": TEACHING_SKILL_PATH}),
+                answer("Here is a worked example."),
+            ]
+        )
+        first_prompt = model._seen[0][0].text
+        self.assertIn(TEACHING_SKILL_PATH, first_prompt)
+        self.assertNotIn("## Choose the help", first_prompt)
+        tool_messages = [m for m in model._seen[1] if isinstance(m, ToolMessage)]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertIn("## Choose the help", tool_messages[0].text)
+        self.assertIn("直接讲解", tool_messages[0].text)
+        self.assertEqual(self.turn.read_calls, 0)
+        self.assertEqual(self.turn.calls, 2)
+        validate_protocol(self.turn.protocol)
+
+    async def test_skill_reader_cannot_access_other_paths(self):
+        for path in (
+            "/etc/passwd",
+            "/memories/profile.md",
+            "/skills/adaptive-teaching/../../.env",
+        ):
+            with self.subTest(path=path), self.assertRaises(AgentToolUseNotAllowedError):
+                await self.run_graph([answer(tool="read_file", args={"file_path": path})])
+            self.assertFalse(any(isinstance(m, ToolMessage) for m in self.turn.protocol))
+
+    async def test_skill_read_memory_read_save_and_answer_fit_four_calls(self):
+        self.turn.bound.explicit_request = True
+        self.turn.bound.save = AsyncMock(return_value="Memory save confirmed.")
+        fact = {
+            "memory_key": "learning.goal",
+            "summary": "likes reading and learning",
+            "source_quote": "I like learning",
+        }
+        model, _ = await self.run_graph(
+            [
+                answer(tool="read_file", args={"file_path": TEACHING_SKILL_PATH}, ident="skill"),
+                answer(
+                    tool="read_profile_topics",
+                    args={"topics": ["learning.goal"]},
+                    ident="profile",
+                ),
+                answer(tool="save_profile_facts", args={"facts": [fact]}, ident="save"),
+                answer("Remembered. Here is an example."),
+            ]
+        )
+        self.assertEqual(len(model._seen), 4)
+        self.turn.bound.save.assert_awaited_once()
+        validate_protocol(self.turn.protocol)
+
+    async def test_skill_contents_are_budgeted_before_followup_model_call(self):
+        with (
+            patch(
+                "app.agent.run_context.load_teaching_skill",
+                return_value=load_teaching_skill() + "\n" + "x" * 70_000,
+            ),
+            self.assertRaises(ContextTooLargeError),
+        ):
+            await self.run_graph(
+                [
+                    answer(tool="read_file", args={"file_path": TEACHING_SKILL_PATH}),
+                    answer(),
+                ]
+            )
 
     async def test_read_save_answer_in_same_graph(self):
         self.turn.bound.explicit_request = True
         self.turn.bound.save = AsyncMock(return_value="Memory save confirmed.")
         fact = {
-            "memory_key": "personal.interests",
+            "memory_key": "learning.goal",
             "summary": "likes reading and learning",
             "source_quote": "I like learning",
         }
         model, events = await self.run_graph(
             [
-                answer(
-                    "Checking", tool="read_profile_topics", args={"topics": ["personal.interests"]}
-                ),
+                answer("Checking", tool="read_profile_topics", args={"topics": ["learning.goal"]}),
                 answer("", tool="save_profile_facts", args={"facts": [fact]}, ident="call-2"),
                 answer("Remembered"),
             ]
@@ -132,7 +202,7 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
                 [
                     answer(
                         tool="read_profile_topics",
-                        args={"topics": ["personal.interests"]},
+                        args={"topics": ["learning.goal"]},
                         ident=f"call-{i}",
                     )
                     for i in range(4)
@@ -143,21 +213,22 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_immediate_save_requires_explicit_request_and_full_topic_read(self):
         fact = {
-            "memory_key": "personal.interests",
+            "memory_key": "learning.goal",
             "summary": "likes learning",
             "source_quote": "likes learning",
         }
         self.turn.bound.save = AsyncMock()
         self.assertIn("No explicit", await self.turn.save([fact]))
         self.turn.bound.explicit_request = True
-        self.turn.facts = {"personal.interests": "likes reading"}
+        self.turn.facts = {"learning.goal": "likes reading"}
         self.assertIn("Read the full", await self.turn.save([fact]))
         self.turn.bound.save.assert_not_awaited()
 
     async def test_prepare_quotes_legacy_messages_and_uses_short_profile(self):
         factory = MagicMock()
         session = factory.return_value.__enter__.return_value
-        session.scalars.return_value = []
+        session.scalars.return_value.all.return_value = []
+        session.scalars.return_value.__iter__.return_value = iter([])
         session.get.return_value = None
         self.turn.factory = factory
         snapshot = await self.turn.prepare()
@@ -175,14 +246,14 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model._seen), 1)
 
     async def test_truncated_tool_request_never_executes(self):
-        message = answer(tool="read_profile_topics", args={"topics": ["personal.interests"]})
+        message = answer(tool="read_profile_topics", args={"topics": ["learning.goal"]})
         message.response_metadata["finish_reason"] = "length"
         with self.assertRaisesRegex(ValueError, "Incomplete model response"):
             await self.run_graph([message])
         self.assertEqual(self.turn.read_calls, 0)
 
     async def test_missing_provider_reasoning_never_executes_tool(self):
-        message = answer(tool="read_profile_topics", args={"topics": ["personal.interests"]})
+        message = answer(tool="read_profile_topics", args={"topics": ["learning.goal"]})
         message.additional_kwargs = {}
         with self.assertRaisesRegex(TypeError, "reasoning_content"):
             await self.run_graph([message])

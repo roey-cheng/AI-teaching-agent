@@ -23,6 +23,7 @@ from app.schemas import (
     UserResponse,
 )
 from app.services.chat_execution import EventDeliveryError, execute_chat_turn
+from app.services.errors import SessionNotFoundError
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import GenerationOutcome
 from app.services.message_submission import AcceptedMessage
@@ -115,6 +116,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, accepted, *args):
                 self.accepted = accepted
                 self.protocol = []
+                self.facts = {}
                 self.input_messages = accepted.prepared_input.as_agent_messages()
 
             async def prepare(self):
@@ -124,10 +126,11 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
                 pass
 
         class StreamAdapter:
-            def __init__(self, agent, turn):
-                self.agent, self.turn = agent, turn
+            def __init__(self, agent):
+                self.agent = agent
 
             async def astream(self, *args, **kwargs):
+                turn = kwargs["context"].turn
                 text, reasoning = "", ""
                 stream = self.agent.astream(*args, **kwargs)
                 try:
@@ -135,7 +138,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
                         text += chunk.content
                         reasoning += chunk.additional_kwargs.get("reasoning_content", "")
                         yield "messages", (chunk, metadata)
-                    self.turn.protocol = [
+                    turn.protocol = [
                         AIMessage(content=text, additional_kwargs={"reasoning_content": reasoning})
                     ]
                 finally:
@@ -143,7 +146,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
 
         self.build_patch = patch(
             "app.services.chat_execution.build_chat_agent",
-            side_effect=lambda s, p, t: StreamAdapter(owner.agent, t),
+            side_effect=lambda s, p: StreamAdapter(owner.agent),
         )
         self.build = self.build_patch.start()
         self.addCleanup(self.build_patch.stop)
@@ -205,6 +208,33 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
             "think",
         )
         self.assertTrue(all(i != threading.get_ident() for i in self.worker_ids))
+
+    async def test_cache_lookup_uses_admitted_user_and_conversation(self):
+        self.accepted = AcceptedMessage("42", "10", str(uuid4()), prepared(user_id="42"))
+        provider = MagicMock()
+        provider.get.return_value = self.build(settings(), prepared().policy)
+        self.build.reset_mock()
+        result = await self.run_turn(agent_provider=provider)
+        self.assertIsInstance(result, MessageDoneData)
+        provider.get.assert_called_once_with(
+            settings(), prepared().policy, user_id="42", session_id="42"
+        )
+        self.build.assert_not_called()
+
+    async def test_rejected_ownership_does_not_access_graph_cache(self):
+        @contextmanager
+        def denied(*args, **kwargs):
+            raise SessionNotFoundError()
+            yield  # pragma: no cover -- models a failing admission context manager
+
+        provider = MagicMock()
+        with (
+            patch("app.services.chat_execution.accept_user_message", side_effect=denied),
+            self.assertRaises(SessionNotFoundError),
+        ):
+            await self.run_turn(agent_provider=provider)
+        provider.get.assert_not_called()
+        self.build.assert_not_called()
 
     async def test_length_missing_finish_reason_and_reasoning_only_are_failures(self):
         for agent in (

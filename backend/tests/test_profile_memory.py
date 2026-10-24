@@ -34,7 +34,7 @@ def row():
 
 
 class ProfileFactTest(unittest.TestCase):
-    def test_all_25_topics_and_summary_boundaries(self):
+    def test_all_12_topics_and_summary_boundaries(self):
         for key in MEMORY_TOPIC_TYPES:
             self.assertEqual(
                 ProfileFact(memory_key=key, summary="  喜欢中文  ").summary, "喜欢中文"

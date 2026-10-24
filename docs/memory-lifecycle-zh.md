@@ -18,16 +18,49 @@ flowchart TD
     O -->|需要细节| R[read_profile_topics]
     R --> O
     O -->|明确保存或更正| W[校验原话、权限和版本]
-    W --> DB[(MySQL agent_memory)]
+    W --> SB[原生 StoreBackend]
+    SB --> S[事务绑定 ProfileStore]
+    S --> DB[(MySQL agent_memory)]
     DB -->|提交回执| O
     O --> A[最终回答 + 内部协议原子落库]
     A --> Q[记录待整理消息 ID]
     Q -->|空闲至少 10 分钟且无正在生成的聊天| C[一次后台模型提取]
     C --> V[来源校验 + 版本比较]
-    V --> DB
+    V --> SB
 ```
 
-这借鉴了“任务内即时更新、任务间整理、按需读取”的记忆生命周期，并不意味着采用了 ChatGPT 的内部实现。存储仍是项目自己的 MySQL，不是 OpenAI 服务，也不是 Deep Agents `StoreBackend`；`checkpointer=None`、`store=None`。重启不会恢复执行到一半的 Agent 图。
+这借鉴了“任务内即时更新、任务间整理、按需读取”的记忆生命周期，并不意味着采用了 ChatGPT 的内部实现。存储仍是项目自己的 MySQL，不是 OpenAI 服务。文件接口现已采用原生 Deep Agents `StoreBackend`，主图配置 `store=store`；`checkpointer=None`，重启不会恢复执行到一半的 Agent 图。
+
+## StoreBackend 与持久化存储（2026-10-24 更新）
+
+- `factory.py` 直接实例化框架的 `StoreBackend`；已移除自写的 `ProfileMemoryBackend`。读取、分页、目录和文件搜索由框架实现。共享 `RunScopedStore` 没有用户状态，只把操作转交给当前运行上下文的 Store。
+- `app/agent/profile_store.py` 的 `ProfileStore` 实现 LangGraph `BaseStore`，把已有 MySQL `agent_memory` 表映射成文件数据。它是项目自己的数据库适配层，不是假设框架自带 MySQL 驱动。
+- 每用户 namespace 为 `("users", str(verified_user_id), "profile")`。用户 ID 来自认证后的业务上下文，不能由模型参数指定。
+- `/memories/topics/<topic>.md` 对应一条已有主题记录；`/memories/profile.md` 是这些记录派生的展示内容，正式模型看到的仍是每轮最多 4 KiB 的简短索引。索引不另外落库、不成为第二份权威数据。
+- Store 有两种明确生命周期：**事务绑定实例**使用调用方的 SQLAlchemy Session 访问 MySQL；**本轮快照实例**只提供固定的只读内容给图。快照内部的 `InMemoryStore` 是临时读取视图，不是长期记忆数据库；数据库读取时也复用其最多 26 个文件的过滤/分页逻辑。
+- 即时保存和空闲整理都经过 `StoreBackend → 事务绑定 ProfileStore → agent_memory`。Store 不自行提交事务；事实审核、版本检查、记忆写入、任务结算仍由业务层控制，相关数据一起提交或回滚。
+- 图上的 Store 不允许写入；Agent 仍调用 `save_profile_facts`，不开放 `write_file/edit_file` 绕过审核。教学 Skill 也在只读快照中，不能被记忆工具覆盖。
+
+这次不新增依赖、数据库表或环境变量，不需要搬迁旧记忆。它不是通用沙箱存储：任意文件写入、删除、TTL 和向量搜索仍未启用。未来要存用户上传资料/沙箱产物，应增加独立 namespace 和相应存储实现，不能塞进受限的 Profile 主题表。
+
+## 图的生命周期：复用结构，不复用用户状态
+
+`build_chat_agent(settings, policy)` 现在只接收固定配置，返回可复用的编译图。
+FastAPI 的 `BackendRuntime.chat_agents` 按已校验归属的 `(user_id, session_id)` 缓存图。
+同一会话第一轮真正执行时创建自己的图，后续消息与重试复用它；不同会话使用不同图，
+即使属于同一个用户也不共享。CLI 在自己的循环中也持有一个 `ChatAgentProvider`，切换新会话会创建另一张图。
+缓存随进程存活，重启后按需重建；数据库中的历史和长期记忆不受影响。
+配置不同的应用实例不共享图；配置运行中改变时要求重启，不缓存多份密钥或静默套用旧策略。
+
+每次执行通过 `prepare_run_context(prepared, turn)` 创建独立 `ChatRunContext`，再传入
+`agent.astream(..., context=context)`。该上下文包含当前用户的记忆快照、有效生成权限和本轮 `TurnMemory`。
+会话图内跨轮复用的中间件没有 `self.turn`，工具也不绑定 `turn.read/turn.save`；它们通过 LangGraph runtime 找到本次调用的 turn。
+StoreBackend 的 namespace 和 Store 操作同样从 runtime 获取，因此不会用到上一轮过期的记忆快照。
+
+同一个 context 只能运行一次；下一轮或重试必须创建新 context。计数、读取记录、协议、输出及取消作用域各自独立。
+`checkpointer=None` 保持不变：图复用不会自动记住上次运行的 state，历史照旧从 MySQL 按会话重建。
+正式聊天使用异步图执行；无工具离线探针可使用 `with_memory_tools=False`。
+独立调用 `execute_chat_turn/execute_chat_retry` 时应传同一个 `agent_provider` 才能复用；省略只用于一次性运行。
 
 ## 渐进读取与工具协议
 

@@ -13,7 +13,7 @@ from langchain_deepseek import ChatDeepSeek
 
 from app.agent.budget_middleware import AgentToolUseNotAllowedError, NoAutomaticSummary
 from app.agent.input_policy import estimate_message_tokens, estimate_text_tokens
-from app.agent.memory_backend import ProfileMemoryBackend
+from app.agent.memory_backend import snapshot_backend
 from app.agent.output import managed_agent_stream
 from app.agent.profile_memory_tool import (
     MEMORY_EXTRACTION_PROMPT,
@@ -116,7 +116,7 @@ def build_memory_agent(settings, prepared, bound):
         tools=[bound.tool],
         subagents=[],
         skills=None,
-        backend=ProfileMemoryBackend(prepared.profile_memory),
+        backend=snapshot_backend(prepared.profile_memory, user_id=int(prepared.user_id)),
         middleware=middleware,
         checkpointer=None,
         store=None,

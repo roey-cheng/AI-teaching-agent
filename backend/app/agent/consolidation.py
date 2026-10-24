@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.budget_middleware import NoAutomaticSummary, check_request_budget
 from app.agent.input_policy import policy_for_model
-from app.agent.memory_backend import ProfileMemoryBackend
+from app.agent.memory_backend import snapshot_backend
 from app.agent.profile_memory_tool import MemoryCandidate, contains_sensitive_memory
 from app.agent.tracing import async_agent_tracing
 from app.core.async_work import complete_in_thread
@@ -35,7 +35,7 @@ class ConsolidatedFact(MemoryCandidate):
 
 class ConsolidationInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
-    facts: list[ConsolidatedFact] = Field(max_length=25)
+    facts: list[ConsolidatedFact] = Field(max_length=12)
 
 
 PROMPT = """Extract and merge only clearly stated, enduring first-person user facts.
@@ -117,7 +117,7 @@ async def extract_candidates(claimed, settings):
         system_prompt=PROMPT,
         tools=[tool],
         subagents=[],
-        backend=ProfileMemoryBackend(""),
+        backend=snapshot_backend("", user_id=claimed.user_id),
         memory=None,
         store=None,
         checkpointer=None,

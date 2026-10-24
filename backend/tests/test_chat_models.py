@@ -310,38 +310,27 @@ class ChatModelsTest(unittest.TestCase):
         self.assertIn("retry_of_attempt_id IS NULL", assistant_rule)
         self.assertIn("in_reply_to_message_id IS NOT NULL", assistant_rule)
 
-    def test_memory_has_exactly_25_documented_topic_pairs(self):
+    def test_memory_has_exactly_12_teaching_topic_pairs(self):
         groups = {
             "LEARNING_PREFERENCE": (
                 "preference.language preference.explanation_style preference.detail_level "
                 "preference.example_style preference.code_style preference.hint_style "
                 "preference.pacing preference.knowledge_connections"
             ),
-            "LEARNING_GOAL": "learning.goal learning.current_topic",
+            "LEARNING_GOAL": "learning.goal",
             "PROGRAMMING_BACKGROUND": (
-                "programming.level programming.languages programming.known_concepts "
-                "programming.tools programming.environment"
-            ),
-            "PERSONAL_BACKGROUND": (
-                "personal.preferred_name personal.occupation personal.interests "
-                "personal.long_term_goal personal.timezone personal.general_location"
-            ),
-            "DAILY_PREFERENCE": (
-                "personal.daily_routine preference.conversation_tone "
-                "lifestyle.food_preferences lifestyle.activity_preferences"
+                "programming.level programming.languages programming.known_concepts"
             ),
         }
         expected = {key: category for category, keys in groups.items() for key in keys.split()}
         self.assertEqual(dict(MEMORY_TOPIC_TYPES), expected)
-        self.assertEqual(len(MEMORY_TOPIC_TYPES), 25)
+        self.assertEqual(len(MEMORY_TOPIC_TYPES), 12)
         self.assertEqual(
             Counter(MEMORY_TOPIC_TYPES.values()),
             {
                 "LEARNING_PREFERENCE": 8,
-                "LEARNING_GOAL": 2,
-                "PROGRAMMING_BACKGROUND": 5,
-                "PERSONAL_BACKGROUND": 6,
-                "DAILY_PREFERENCE": 4,
+                "LEARNING_GOAL": 1,
+                "PROGRAMMING_BACKGROUND": 3,
             },
         )
         checks = checks_for(AgentMemory)

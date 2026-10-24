@@ -2,12 +2,13 @@
 
 import json
 
+from deepagents.backends.protocol import BackendProtocol
 from deepagents.middleware.memory import MemoryMiddleware, MemoryState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.input_policy import AgentInputPolicy, estimate_text_tokens
-from app.agent.memory_backend import PROFILE_MEMORY_PATH, ProfileMemoryBackend
+from app.agent.memory_backend import PROFILE_MEMORY_PATH
 from app.services.errors import ContextTooLargeError
 
 
@@ -58,7 +59,9 @@ class ChatMemoryBudgetMiddleware(MemoryMiddleware):
     def name(self) -> str:
         return "MemoryMiddleware"
 
-    def __init__(self, backend: ProfileMemoryBackend, policy: AgentInputPolicy) -> None:
+    def __init__(
+        self, backend: BackendProtocol, policy: AgentInputPolicy, *, run_scoped=False
+    ) -> None:
         super().__init__(
             backend=backend,
             sources=[PROFILE_MEMORY_PATH],
@@ -75,14 +78,26 @@ class ChatMemoryBudgetMiddleware(MemoryMiddleware):
             ),
         )
         self.policy = policy
+        self.run_scoped = run_scoped
+
+    def _claim_context(self, runtime):
+        if self.run_scoped:
+            from app.agent.run_context import require_run_context
+
+            context = require_run_context(runtime)
+            if context.prepared.policy != self.policy:
+                raise ValueError("Run input policy does not match the compiled graph")
+            context.claim()
 
     def before_agent(self, state: MemoryState, runtime, config):
+        self._claim_context(runtime)
         # 不信任调用时夹带的 memory_contents；总从本次绑定的只读快照重新加载。
         clean_state = state.copy()
         clean_state.pop("memory_contents", None)
         return super().before_agent(clean_state, runtime, config)
 
     async def abefore_agent(self, state: MemoryState, runtime, config):
+        self._claim_context(runtime)
         clean_state = state.copy()
         clean_state.pop("memory_contents", None)
         return await super().abefore_agent(clean_state, runtime, config)

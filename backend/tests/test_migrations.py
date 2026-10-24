@@ -23,7 +23,8 @@ from testing_support import require_value
 
 BACKEND = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "20260925_0001"
-HEAD_REVISION = "20261012_0003"
+RUNTIME_REVISION = "20261012_0003"
+HEAD_REVISION = "20261025_0004"
 
 
 def make_config(output=None):
@@ -51,15 +52,21 @@ class MigrationTest(unittest.TestCase):
     def setUp(self):
         self.script = ScriptDirectory.from_config(make_config())
         self.revision = self.script.get_revision(INITIAL_REVISION).module
+        self.runtime_revision = self.script.get_revision(RUNTIME_REVISION).module
         self.head_revision = self.script.get_revision(HEAD_REVISION).module
         self.quota_revision = self.script.get_revision("20261012_0002").module
 
     def test_linear_revision_chain_and_no_live_model_imports(self):
         self.assertEqual(self.script.get_heads(), [HEAD_REVISION])
         self.assertIsNone(self.revision.down_revision)
-        self.assertEqual(self.head_revision.down_revision, "20261012_0002")
+        self.assertEqual(self.head_revision.down_revision, RUNTIME_REVISION)
         self.assertEqual(self.quota_revision.down_revision, INITIAL_REVISION)
-        for revision in (self.revision, self.quota_revision, self.head_revision):
+        for revision in (
+            self.revision,
+            self.quota_revision,
+            self.runtime_revision,
+            self.head_revision,
+        ):
             source = Path(require_value(revision.__file__)).read_text()
             tree = ast.parse(source)
             imports = []
@@ -83,7 +90,12 @@ class MigrationTest(unittest.TestCase):
             table = metadata.tables[table_name]
             return sa.Index(name, *(table.c[column] for column in columns), **options)
 
-        for revision in (self.revision, self.quota_revision, self.head_revision):
+        for revision in (
+            self.revision,
+            self.quota_revision,
+            self.runtime_revision,
+            self.head_revision,
+        ):
             offline = (
                 patch.object(revision.context, "is_offline_mode", return_value=True)
                 if hasattr(revision, "context")
@@ -104,7 +116,23 @@ class MigrationTest(unittest.TestCase):
             with self.subTest(table=name):
                 self.assertEqual(list(table.columns.keys()), list(model.columns.keys()))
                 self.assertEqual(dict(table.kwargs), dict(model.kwargs))
-                self.assertEqual(constraints_for(table), constraints_for(model))
+                actual_constraints = constraints_for(table)
+                expected_constraints = constraints_for(model)
+                if name == "agent_memory":
+                    # The initial table snapshot intentionally contains the old
+                    # CHECK; the latest data migration replaces it with the
+                    # current 12-topic policy via ALTER TABLE SQL.
+                    actual_constraints = {
+                        item
+                        for item in actual_constraints
+                        if item[1] != "ck_agent_memory_topic_type"
+                    }
+                    expected_constraints = {
+                        item
+                        for item in expected_constraints
+                        if item[1] != "ck_agent_memory_topic_type"
+                    }
+                self.assertEqual(actual_constraints, expected_constraints)
                 self.assertEqual(
                     {(i.name, tuple(i.columns.keys()), i.unique) for i in table.indexes},
                     {(i.name, tuple(i.columns.keys()), i.unique) for i in model.indexes},
@@ -150,6 +178,9 @@ class MigrationTest(unittest.TestCase):
         ):
             self.assertIn(expected, sql)
         self.assertNotIn("DROP TABLE", sql)
+        topic_source = Path(require_value(self.head_revision.__file__)).read_text()
+        self.assertIn("personal.interests", topic_source)
+        self.assertIn("20261025_0004", sql)
 
     def test_downgrade_sql_drops_children_before_parents(self):
         output = StringIO()

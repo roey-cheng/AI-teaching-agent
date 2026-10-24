@@ -60,8 +60,6 @@ export type MemoryType =
   | 'LEARNING_PREFERENCE'
   | 'LEARNING_GOAL'
   | 'PROGRAMMING_BACKGROUND'
-  | 'PERSONAL_BACKGROUND'
-  | 'DAILY_PREFERENCE'
 
 export type Memory = {
   memory_id: string

@@ -2,11 +2,12 @@
 
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agent.factory import ChatAgentProvider
 from app.core.config import load_generation_quota_settings
 from app.core.runtime_lock import RuntimeLock
 from app.db.readiness import DatabaseNotReadyError, check_database_ready
@@ -27,6 +28,7 @@ class BackendRuntime:
     quota: GenerationQuota
     database_guard: DatabaseRuntimeGuard
     cleanup: StartupCleanupResult
+    chat_agents: ChatAgentProvider = field(default_factory=ChatAgentProvider, repr=False)
 
 
 @contextmanager

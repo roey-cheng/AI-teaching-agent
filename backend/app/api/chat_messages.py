@@ -86,6 +86,7 @@ def response_for(request: Request, user, session_id, body, *, message_id=None):
                 input_policy=configuration.policy,
                 on_event=on_event,
                 quota=runtime.quota,
+                agent_provider=runtime.chat_agents,
             )
         return await execute_chat_retry(
             user,
@@ -100,6 +101,7 @@ def response_for(request: Request, user, session_id, body, *, message_id=None):
             input_policy=configuration.policy,
             on_event=on_event,
             quota=runtime.quota,
+            agent_provider=runtime.chat_agents,
         )
 
     return ChatStreamResponse(

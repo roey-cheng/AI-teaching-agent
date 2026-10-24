@@ -242,7 +242,7 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.tools[0]["args"] = {
             "facts": [
                 {
-                    "memory_key": "personal.interests",
+                    "memory_key": "learning.goal",
                     "summary": "热爱学习",
                     "source_quote": previous,
                 }
@@ -278,7 +278,7 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.tools[0]["args"] = {
             "facts": [
                 {
-                    "memory_key": "personal.interests",
+                    "memory_key": "learning.goal",
                     "summary": "热爱学习",
                     "source_quote": previous,
                 }

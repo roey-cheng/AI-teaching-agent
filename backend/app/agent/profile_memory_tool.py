@@ -69,7 +69,7 @@ class MemoryCandidate(ProfileFact):
 
 class SaveMemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
-    facts: list[MemoryCandidate] = Field(min_length=1, max_length=25)
+    facts: list[MemoryCandidate] = Field(min_length=1, max_length=12)
 
     @field_validator("facts")
     @classmethod
@@ -91,8 +91,8 @@ Never infer facts from names, language, IP, code, examples, hypothetical stateme
 quoted text, third-party information, or a one-off instruction such as 'this time'.
 If explicit_memory_request is true and an eligible fact is clear in the current or immediately
 preceding user message, you MUST call save_profile_facts. This includes short but clear profile
-facts such as "我热爱学习" (personal.interests), "我不喜欢咖啡"
-(lifestyle.food_preferences), and "I prefer concise explanations" (preference.detail_level).
+facts such as "我的学习目标是掌握 Python 异步编程" (learning.goal) and
+"I prefer concise explanations" (preference.detail_level).
 If the same fact is already present, call the tool with the same complete merged summary so the
 backend can confirm the explicit request without creating a duplicate row. If an explicit request
 does not identify an eligible fact, do not guess; return 'Needs clarification'.

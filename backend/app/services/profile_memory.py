@@ -3,13 +3,13 @@
 from datetime import UTC, datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from sqlalchemy import select
-from sqlalchemy.dialects.mysql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import AgentMemory, Message
+from app.agent.profile_store import ProfileStore, save_profile_files
+from app.models import Message
 from app.models.agent_memory import MEMORY_TOPIC_TYPES
 from app.schemas import MemoryListResponse, MemoryResponse, UserResponse
 from app.services.errors import MemoryUnavailableError
@@ -52,7 +52,7 @@ class ProfileFact(BaseModel):
         return value
 
 
-_facts_adapter = TypeAdapter(Annotated[list[ProfileFact], Field(min_length=1, max_length=25)])
+_facts_adapter = TypeAdapter(Annotated[list[ProfileFact], Field(min_length=1, max_length=12)])
 
 
 def list_profile_memory(
@@ -62,17 +62,11 @@ def list_profile_memory(
     """先由调用方认证；只读本人记忆，按更新时间/编号倒序返回公开字段。"""
     try:
         with session_factory() as session:
-            rows = session.scalars(
-                select(AgentMemory)
-                .where(
-                    AgentMemory.user_id == int(current_user.user_id),
-                )
-                .order_by(AgentMemory.updated_at.desc(), AgentMemory.memory_id.desc())
-            ).all()
+            rows = ProfileStore(int(current_user.user_id), session).rows()
             return MemoryListResponse.model_validate(
                 {"items": [MemoryResponse.model_validate(row) for row in rows]}
             )
-    except SQLAlchemyError, ValidationError:
+    except SQLAlchemyError, ValueError:
         # 数据库不可用不能伪装成空列表，也不输出 SQL/凭据/原始记忆。
         raise MemoryUnavailableError() from None
 
@@ -142,41 +136,15 @@ def save_profile_facts(
                         {key: question.message_id for key in keys},
                         expected_revisions,
                     )
-                # 固定顺序减少多个会话同时写多主题时的死锁机会；仍不自动重试故障。
-                statement = insert(AgentMemory).values(
-                    [
-                        {
-                            "user_id": user_id,
-                            "memory_key": fact.memory_key,
-                            "memory_type": MEMORY_TOPIC_TYPES[fact.memory_key],
-                            "summary": fact.summary,
-                            "created_at": now,
-                            "updated_at": now,
-                        }
-                        for fact in sorted(checked, key=lambda item: item.memory_key)
-                    ]
+                save_profile_files(
+                    session, user_id, sorted(checked, key=lambda item: item.memory_key), now
                 )
-                # 唯一键 (user_id, memory_key) 决定新增还是更新；不覆盖未涉及的主题。
-                # 不改 memory_id/created_at，不累计证据。同主题并发采用提交顺序后写生效。
-                session.execute(
-                    statement.on_duplicate_key_update(
-                        summary=statement.inserted.summary,
-                        updated_at=statement.inserted.updated_at,
-                    )
-                )
-                rows = session.scalars(
-                    select(AgentMemory)
-                    .where(
-                        AgentMemory.user_id == user_id,
-                        AgentMemory.memory_key.in_(keys),
-                    )
-                    .order_by(AgentMemory.updated_at.desc(), AgentMemory.memory_id.desc())
-                ).all()
+                rows = ProfileStore(user_id, session).rows(keys=keys)
                 result = MemoryListResponse.model_validate(
                     {"items": [MemoryResponse.model_validate(row) for row in rows]}
                 )
             # begin 正常退出、COMMIT 得到确认后才返回成功；不释放生成占用。
             return result
-    except SQLAlchemyError, ValidationError:
+    except SQLAlchemyError, ValueError:
         # 提交断线可能已落库；不声称一定回滚、不盲目自动重试、不返回“已保存”。
         raise MemoryUnavailableError() from None
