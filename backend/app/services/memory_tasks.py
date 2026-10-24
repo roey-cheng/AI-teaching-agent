@@ -7,8 +7,8 @@ from uuid import uuid4
 
 from sqlalchemy import func, select
 
+from app.agent.profile_store import ProfileStore, save_profile_files
 from app.models import (
-    AgentMemory,
     ChatSession,
     GenerationAttempt,
     GenerationControl,
@@ -52,10 +52,7 @@ def touch_memory(session, user_id, now, *, dirty=False, message_id=None):
 
 
 def profile_snapshot(session, user_id):
-    facts = {
-        row.memory_key: row.summary
-        for row in session.scalars(select(AgentMemory).where(AgentMemory.user_id == user_id))
-    }
+    facts = ProfileStore(user_id, session).facts()
     versions = {
         row.memory_key: (row.revision, row.source_message_id)
         for row in session.scalars(
@@ -275,24 +272,9 @@ def finish_memory_job(factory, claimed, candidates, now=None):
         if job.status != "RUNNING":
             raise MemoryConflict("Expired job")
         check_and_bump_revisions(session, claimed.user_id, evidence, evidence, claimed.versions)
-        from app.models.agent_memory import MEMORY_TOPIC_TYPES
-
-        for fact in checked:
-            row = session.scalar(
-                select(AgentMemory).where(
-                    AgentMemory.user_id == claimed.user_id,
-                    AgentMemory.memory_key == fact.memory_key,
-                )
-            )
-            if row is None:
-                row = AgentMemory(
-                    user_id=claimed.user_id,
-                    memory_key=fact.memory_key,
-                    memory_type=MEMORY_TOPIC_TYPES[fact.memory_key],
-                    created_at=now,
-                )
-                session.add(row)
-            row.summary, row.updated_at = fact.summary, now
+        save_profile_files(
+            session, claimed.user_id, sorted(checked, key=lambda fact: fact.memory_key), now
+        )
         state = session.get(MemoryState, claimed.user_id)
         state.cursor = max(state.cursor, *job.source_ids)
         state.pending_ids = [mid for mid in state.pending_ids if mid not in job.source_ids]

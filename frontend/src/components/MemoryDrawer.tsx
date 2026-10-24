@@ -10,8 +10,6 @@ const labelKeys: Record<MemoryType, MessageKey> = {
   LEARNING_PREFERENCE: 'learningPreference',
   LEARNING_GOAL: 'learningGoal',
   PROGRAMMING_BACKGROUND: 'programmingBackground',
-  PERSONAL_BACKGROUND: 'personalBackground',
-  DAILY_PREFERENCE: 'dailyPreference',
 }
 
 export function MemoryDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {

@@ -6,6 +6,49 @@
 
 当前记忆架构与部署要求见 [记忆生命周期](../docs/memory-lifecycle-zh.md)：Teaching Orchestrator 同图即时读写 + 默认关闭的空闲整理。Alembic head 为 `20261012_0003`，新增四张内部表。所属用户现可通过 `GET /api/v1/chat/sessions/{session_id}/messages/{message_id}/reasoning` 读取成功回答的推理文本；该接口不调用模型、不返回工具参数/结果，禁止缓存，无需新迁移。下文按开发阶段保留的“两阶段、回答禁用工具、推理不持久化”等描述属于旧实现，不再代表正式执行器当前行为；旧 `memory_workflow.py` 留作兼容测试，不是每轮入口。
 
+## 原生 StoreBackend（2026-10-24）
+
+记忆文件接口已改为 Deep Agents 原生 `StoreBackend`，不再维护自写的 `ProfileMemoryBackend`。
+`factory.py` 的 `store=store` 是无用户状态的路由器，运行时从 `ChatRunContext` 获取当前用户的只读快照；持久化读写通过
+`ProfileStore`（LangGraph `BaseStore` 的 MySQL 适配）访问现有 `agent_memory` 表。
+即时记忆工具和后台整理共用这一入口，保留原话审核、版本冲突和同事务提交。
+`/memories/profile.md` 仍是派生的只读展示文件，不是第二份数据库记录。
+没有新增依赖、表、迁移或环境变量；这不是用 `InMemoryStore` 替代长期数据库。
+详细映射和快照/事务生命周期见 [记忆生命周期](../docs/memory-lifecycle-zh.md)。
+
+## 教学 Skill
+
+正式聊天通过 Deep Agents 原生 `SkillsMiddleware` 发现教学技能：
+`factory.py` 的正式聊天图传入 `skills=["/skills/"]`，不绑定某个 `turn`。
+技能正文位于 [adaptive-teaching/SKILL.md](app/agent/skills/adaptive-teaching/SKILL.md)，
+适配自 [bstellato/ai-teaching-skills](https://github.com/bstellato/ai-teaching-skills)，
+固定来源版本、MIT 许可和修改说明见同目录的 `LICENSE`。
+
+- 模型先看到名称、简介和虚拟路径，需要时通过框架的 `read_file` 加载正文。
+- 支持直接讲解、分级提示和检查解题尝试；用户要求完整解释时可以切换，不强制一直反问。
+- `read_file` 仅允许 `/skills/adaptive-teaching/SKILL.md`。所有文件写入、宿主机路径和子 Agent 调用仍不开放。
+- 技能文件由 Python 包资源读取，随后端仓库部署，无需环境变量、数据库迁移或个人电脑路径。
+- 技能工具结果参与预算检查并进入本轮协议记录；若完整正文仍在选中的历史中，提示模型避免重复读取。
+- 每轮仍最多 4 次模型调用。首次读取技能通常多占一次模型往返；可执行“读技能 → 读记忆 → 保存记忆 → 最终回答”。
+- 系统提示继续保留身份、预算和记忆规则，教学方法放在 skill 中。技能选择与教学效果需通过真实模型验收，离线测试验证发现、读取、协议与权限边界。
+
+可用“直接讲解 Python 的闭包，并给一个例子”“带我做这道题，每次只给一个提示”或“检查我的解题过程”验收。
+
+## 复用聊天图
+
+`build_chat_agent(settings, policy)` 只编译固定的模型、工具定义和中间件，不再接收
+`prepared_input` 或 `turn`。HTTP 的 `BackendRuntime.chat_agents` 和终端的
+`ChatAgentProvider` 按已校验归属的 `(user_id, session_id)` 缓存：同一会话的新消息与重试
+复用同一张图，不同会话各自创建图，不是所有用户共用一张图。缓存随进程存活，重启后按需重建。
+模型配置或策略改变时需重启对应 runtime，不静默继续使用旧配置。
+
+每次执行仍新建 `TurnMemory` 和 `ChatRunContext`，通过
+`agent.astream({"messages": ...}, context=context)` 传入。记忆、工具写入权限、计数、
+协议记录属于这次调用；工具从 LangGraph runtime 取当前 turn，而非闭包捕获旧 turn。
+`checkpointer=None`：会话图跨轮复用不代表自动保留历史状态，历史仍从 MySQL 按用户和会话加载。
+只支持正式异步执行；离线无工具探针可显式 `with_memory_tools=False`。
+独立调用执行器时传入同一个 `agent_provider` 才能跨调用复用；省略时是一次性运行。
+
 ## Python 环境
 
 使用 Python 3.14 和 `uv` 管理环境。当前本机验证版本为 Python 3.14.7、uv 0.12.15。
@@ -309,7 +352,7 @@ uv run python scripts/check_migration_mysql.py
 | `app/models/auth_session.py` | auth_sessions：登录状态 | 凭据哈希唯一，登录到期和撤销时间 |
 | `app/models/chat_session.py` | chat_sessions：聊天会话 | 用户归属、标题、手动命名标记、侧栏活动时间 |
 | `app/models/message.py` | messages：问题和回复 | 自引用外键、发送键防重复、USER/ASSISTANT 字段规则 |
-| `app/models/agent_memory.py` | agent_memory：个人记忆 | 每用户每主题唯一，25 个固定主题与分类配对 |
+| `app/models/agent_memory.py` | agent_memory：个人记忆 | 每用户每主题唯一，12 个教学相关主题与分类配对 |
 
 `app/models/__init__.py` 统一导入五个模型，结构登记到同一个 `Base.metadata`。记忆主题允许列表 `MEMORY_TOPIC_TYPES` 与 CHECK 来源一致，供后续 Schema、工具和服务复用；未来迁移应冻结当时的约束，不直接引用不断变化的模型常量。
 
@@ -443,7 +486,7 @@ Migration 是数据库结构的版本变更记录，不是 API Schema，也不�
 
 迁移文件的 `upgrade()` 创建 users → auth_sessions → chat_sessions → agent_memory → messages；`downgrade()` 按相反顺序删除这些表，**会连同表内数据一起删除，不是无损撤销**。已在独立临时 MySQL 容器执行并验证这两个函数，没有在项目数据库上执行它们。
 
-首份迁移不导入当前模型或记忆主题常量，而是固定保存当时的完整结构和 25 个主题配对，避免以后修改模型导致旧迁移改变。env.py 导入模型只是供后续差异比较；不会用 `Base.metadata.create_all()` 代替迁移。Alembic 自动比较不能保证发现所有 CHECK 等约束变化，新迁移必须人工审阅。
+首份迁移不导入当前模型或记忆主题常量，而是固定保存当时的完整结构和 25 个主题配对；`20261025_0004` 再将允许列表收窄到 12 个教学相关主题，避免以后修改模型导致旧迁移改变。env.py 导入模型只是供后续差异比较；不会用 `Base.metadata.create_all()` 代替迁移。Alembic 自动比较不能保证发现所有 CHECK 等约束变化，新迁移必须人工审阅。
 
 ### 现在可以安全查看的内容（不连接数据库）
 
@@ -586,11 +629,11 @@ uv run python -m unittest discover -s tests -p 'test_message_schemas.py' -v
 |---|---|
 | `app/schemas/memory.py` / `MemoryResponse` | 记忆公开字段仅 memory_id、memory_type、summary、updated_at；支持读取已加载 ORM 对象 |
 | `MemoryListResponse` | `GET /api/v1/me/memory` 返回 `{"items": [...]}`，无记忆时显式提供空列表 |
-| `MemoryType` | 限定五种展示类别；不是 25 个内部主题 memory_key |
+| `MemoryType` | 限定三种展示类别；不是 12 个内部主题 memory_key |
 | `app/schemas/error.py` / `ErrorDetail` | 错误代号、可公开提示、请求编号：code、message、request_id |
 | `ErrorResponse` | 通用 HTTP 错误外壳 `{"error": {...}}` |
 
-记忆编号沿用正整数 ID 转字符串规则，更新时间沿用 UTC 规则；summary 限 1～500 字符并保留原文，不把用户内容强制翻译为英文。memory_key、user_id、created_at 等内部字段不输出。查询当前用户、按 updated_at DESC / memory_id DESC 排序、过滤敏感内容和写入记忆都仍由后续业务层负责；Schema 不查询、不排序、不鉴权。测试检查五种展示类别与现有 25 个模型主题的类别集合一致。
+记忆编号沿用正整数 ID 转字符串规则，更新时间沿用 UTC 规则；summary 限 1～500 字符并保留原文，不把用户内容强制翻译为英文。memory_key、user_id、created_at 等内部字段不输出。查询当前用户、按 updated_at DESC / memory_id DESC 排序、过滤敏感内容和写入记忆都仍由后续业务层负责；Schema 不查询、不排序、不鉴权。测试检查三种展示类别与现有 12 个模型主题的类别集合一致。
 
 普通错误只有 error 外壳和三个必填字符串字段，code 最多 64 字符，message 最多 500 字符，request_id 非空但不假设它是 UUID。这些长度与现有 SSE 错误格式保持一致。不将 HTTP 状态码塞进 JSON；未来接口/异常处理器负责设置真实状态码，生成 request_id，并把 ValidationError、业务错误、未知异常转成安全的公开英文提示。输出字段过滤不是正文脱敏：不能直接传入原始异常文本，也不能原样返回可能含密码的 `.errors()` 数据。流开始后的错误继续使用 `MessageErrorData`，不更改已有 SSE 契约。
 
@@ -808,7 +851,7 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 ## 创建正式聊天 Agent
 
-2026-10-09 完成创建模块及离线执行验证。本次新增文件按实际编写顺序：
+以下保留 2026-10-09 的历史实现说明；其中自写 Backend 和 `store=None` 已被上方的原生 StoreBackend 方案替代。当时新增文件按实际编写顺序：
 
 1. `app/agent/memory_backend.py`：先实现 `ProfileMemoryBackend`，继承 Deep Agents 的 `BackendProtocol`。把准备好的记忆文本作为只读虚拟 `/memories/profile.md` 提供给框架；没有实际磁盘文件、数据库连接或命令执行能力。其他文件路径拒绝读取，write/edit/delete/upload 全部拒绝；异步接口复用同样限制。每个实例只持有本次用户的不可变快照。
 2. `app/agent/budget_middleware.py`：再实现 `ChatMemoryBudgetMiddleware`，继承框架的 `MemoryMiddleware`。使用同名替换机制，让框架先加载快照、加入 system message，再检查最终请求。每次运行都重新从绑定快照加载，不接受调用参数夹带的 `memory_contents` 覆盖用户记忆。另用无操作的 `NoAutomaticSummary` 同名替换主 Agent 的自动摘要中间件，不调用额外摘要模型。
@@ -890,7 +933,7 @@ uv run python scripts/check_migration_mysql.py
 
 ### 按编写顺序学习
 
-1. `app/services/profile_memory.py` 的 `ProfileFact`：定义后端内部的存储参数，每条包含 `memory_key`（主题）和 `summary`（完整摘要）。复用表模型的 25 个主题，摘要去掉首尾空白后必须为 1～500 字符。拒绝额外传入 user_id、memory_type、attempt_id；类型由主题推导，用户和生成编号从后端准入结果获得。这不是新增公开 API Schema。
+1. `app/services/profile_memory.py` 的 `ProfileFact`：定义后端内部的存储参数，每条包含 `memory_key`（主题）和 `summary`（完整摘要）。复用表模型的 12 个教学主题，摘要去掉首尾空白后必须为 1～500 字符。拒绝额外传入 user_id、memory_type、attempt_id；类型由主题推导，用户和生成编号从后端准入结果获得。这不是新增公开 API Schema。
 2. 同文件的 `list_profile_memory`：接收已通过认证的 `current_user`，只查询该用户的 `agent_memory`，按 updated_at、memory_id 倒序排列，再用已有 `MemoryListResponse` 返回公开字段。没有记忆返回 `items=[]`；数据库失败不能假装空列表。以后 `GET /api/v1/me/memory` 调用它，但目前还没有该路由。
 3. 同文件的 `save_profile_facts`：接收后端的 `AcceptedMessage` 和已审核摘要，检查本地运行登记、会话归属、原问题及数据库 attempt/status；只有当前 RUNNING 尝试且尚无最终回答才能写。使用 MySQL 的 `INSERT ... ON DUPLICATE KEY UPDATE`：同用户同主题已有记录就更新，没有就插入。只更新本次涉及的主题，不拿一整份旧 Profile 覆盖所有内容。
 4. `services/errors.py` 增加 `MemoryUnavailableError`：查询或保存不能确认时返回安全错误，不暴露原始 SQL、记忆或凭据。增加离线测试和 `scripts/profile_memory_mysql_cases.py`，后者加入现有隔离 MySQL 验收。
@@ -901,7 +944,7 @@ uv run python scripts/check_migration_mysql.py
 ProfileFact(memory_key="preference.language", summary="喜欢用中文解释")
 ```
 
-保存函数从可信执行上下文取得 user_id，自己推导 memory_type 为 LEARNING_PREFERENCE。如果这个用户已经有该主题，就更新同一条记录，保留 memory_id 和 created_at；不会因重复调用多出一条，不会改用户昵称或聊天消息。一次批次 1～25 条且不能重复主题，全批次在同一个短事务中提交，得到提交确认后才返回本次涉及的记忆。
+保存函数从可信执行上下文取得 user_id，自己根据主题推导 memory_type。如果这个用户已经有该主题，就更新同一条记录，保留 memory_id 和 created_at；不会因重复调用多出一条，不会改用户昵称或聊天消息。一次批次 1～12 条且不能重复主题，全批次在同一个短事务中提交，得到提交确认后才返回本次涉及的记忆。
 
 ### 存储完成不等于自动记忆完成
 
@@ -962,7 +1005,7 @@ Explain a Python dictionary.
 ### 记忆规则与边界
 
 - 提取提示要求只记明确、持续的本人事实；不把临时指令、示例、引用、别人的信息或问过的知识当个人记忆。模型需读旧摘要，保留仍有效的事实，并合并补充/处理明确纠正。原话引用必须确实存在于当前问题，否则整批拒绝。引用匹配只证明文本出现过，不证明模型的语义理解正确。
-- 25 个主题来自共同允许列表；每条摘要最多 500 字符、原话引用最多 1000 字符，每批最多 25 个不同主题。模型不能指定用户、分类或生成身份。敏感关键词/号码模式在原问题及候选摘要上做保守拦截；命中原问题时不调用记忆模型。可能误拒，也可能漏检，不承诺自动识别全部敏感语义；公开给真实用户前仍需隐私告知、控制/删除与更全面评估。
+- 12 个教学主题来自共同允许列表；每条摘要最多 500 字符、原话引用最多 1000 字符，每批最多 12 个不同主题。个人兴趣、职业、地区、时区、日常、饮食、活动和短期课程上下文不作为长期 Profile Memory；账户昵称仍由用户资料保存。模型不能指定用户、分类或生成身份。敏感关键词/号码模式在原问题及候选摘要上做保守拦截；命中原问题时不调用记忆模型。可能误拒，也可能漏检，不承诺自动识别全部敏感语义；公开给真实用户前仍需隐私告知、控制/删除与更全面评估。
 - 聊天原文仍按原有规则入 messages，回答模型仍读取原问题。跳过长期记忆不等于聊天原文被脱敏；LangSmith 开启时也可能另存请求和工具轨迹。
 - 文件写入、执行命令、搜索和 `task` 等框架工具仍拒绝；不挂载宿主机目录，不开放其他用户数据。
 - 无需记忆就跳过；记忆模型超时、输入超预算或保存无法确认时，不自动重试，给回答阶段一个后端生成的状态提示，尽量继续正常回答。事件消费者断开和执行取消不能被吞成普通记忆错误。

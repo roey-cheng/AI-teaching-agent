@@ -111,6 +111,9 @@ def run_chat(
     模型运行期间由 Runner 取消主协程，execute_chat_turn 完成自己的安全收尾。
     """
     token = None
+    from app.agent.factory import ChatAgentProvider
+
+    agent_provider = ChatAgentProvider()
     code = 0
     try:
         policy = policy_for_model(model_settings.name)
@@ -201,6 +204,7 @@ def run_chat(
                                 user_id
                             ),
                             on_event=printer,
+                            agent_provider=agent_provider,
                         )
                     )
                     if isinstance(result, DuplicateMessageResponse):

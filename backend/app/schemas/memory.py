@@ -10,8 +10,6 @@ MemoryType = Literal[
     "LEARNING_PREFERENCE",
     "LEARNING_GOAL",
     "PROGRAMMING_BACKGROUND",
-    "PERSONAL_BACKGROUND",
-    "DAILY_PREFERENCE",
 ]
 
 
@@ -26,7 +24,7 @@ class MemoryResponse(BaseModel):
     memory_type: MemoryType
     summary: str = Field(min_length=1, max_length=500)
     updated_at: UTCDateTime
-    # 25 个 memory_key 是内部主题，以上五种 memory_type 是页面展示类别。
+    # memory_key 是内部主题，以上三种 memory_type 是页面展示类别。
     # 字段过滤不是正文脱敏；记忆的权限和敏感信息过滤仍由业务层负责。
 
 

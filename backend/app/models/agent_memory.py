@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
-# 25 个主题的共同允许列表。后续 Schema/工具/服务复用它，不分别维护不同版本。
+# 教学相关主题的共同允许列表。后续 Schema/工具/服务复用它，不分别维护不同版本。
 # MappingProxyType 把字典变成只读映射，避免运行时误改；内容全部是项目常量。
 MEMORY_TOPIC_TYPES = MappingProxyType(
     {
@@ -20,22 +20,9 @@ MEMORY_TOPIC_TYPES = MappingProxyType(
         "preference.pacing": "LEARNING_PREFERENCE",
         "preference.knowledge_connections": "LEARNING_PREFERENCE",
         "learning.goal": "LEARNING_GOAL",
-        "learning.current_topic": "LEARNING_GOAL",
         "programming.level": "PROGRAMMING_BACKGROUND",
         "programming.languages": "PROGRAMMING_BACKGROUND",
         "programming.known_concepts": "PROGRAMMING_BACKGROUND",
-        "programming.tools": "PROGRAMMING_BACKGROUND",
-        "programming.environment": "PROGRAMMING_BACKGROUND",
-        "personal.preferred_name": "PERSONAL_BACKGROUND",
-        "personal.occupation": "PERSONAL_BACKGROUND",
-        "personal.interests": "PERSONAL_BACKGROUND",
-        "personal.long_term_goal": "PERSONAL_BACKGROUND",
-        "personal.timezone": "PERSONAL_BACKGROUND",
-        "personal.general_location": "PERSONAL_BACKGROUND",
-        "personal.daily_routine": "DAILY_PREFERENCE",
-        "preference.conversation_tone": "DAILY_PREFERENCE",
-        "lifestyle.food_preferences": "DAILY_PREFERENCE",
-        "lifestyle.activity_preferences": "DAILY_PREFERENCE",
     }
 )
 

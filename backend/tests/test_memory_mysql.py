@@ -18,7 +18,9 @@ from test_memory_orchestrator import MemoryModel, answer
 
 from alembic import command
 from app.agent.consolidation import ConsolidatedFact
+from app.agent.factory import ChatAgentProvider
 from app.agent.input_policy import policy_for_model
+from app.agent.profile_store import PROFILE_MEMORY_PATH, ProfileStore, topic_path
 from app.core.config import GenerationQuotaSettings, MemorySettings, TracingSettings
 from app.models import (
     AgentMemory,
@@ -26,6 +28,7 @@ from app.models import (
     ChatSession,
     MemoryJob,
     MemoryState,
+    MemoryTopicRevision,
     Message,
     User,
 )
@@ -51,6 +54,48 @@ TEST_URL = os.environ.get("MEMORY_TEST_MYSQL_URL")
 
 @unittest.skipUnless(TEST_URL, "Requires explicit disposable MEMORY_TEST_MYSQL_URL")
 class MemoryMySQLTest(unittest.TestCase):
+    def test_native_storebackend_persists_across_new_sessions_and_isolates_users(self):
+        with self.factory.begin() as session:
+            user = self.make_user(session)
+            other = self.make_user(session)
+            uid, other_id = user.user_id, other.user_id
+            backend = ProfileStore(uid, session, writable=True).backend()
+            backend.write(topic_path("preference.language"), "喜欢中文")
+        with self.factory() as session:
+            backend = ProfileStore(uid, session).backend()
+            file = backend.download_files([PROFILE_MEMORY_PATH])[0]
+            self.assertIn("喜欢中文", require_value(file.content).decode())
+            self.assertEqual(ProfileStore(other_id, session).facts(), {})
+            original_id = ProfileStore(uid, session).rows()[0].memory_id
+        with self.factory.begin() as session:
+            ProfileStore(uid, session, writable=True).backend().edit(
+                topic_path("preference.language"), "中文", "英文"
+            )
+        with self.factory() as session:
+            store = ProfileStore(uid, session)
+            self.assertEqual(store.facts()["preference.language"], "喜欢英文")
+            self.assertEqual(store.rows()[0].memory_id, original_id)
+
+    def test_store_write_and_revision_rollback_together(self):
+        from app.models import MemoryTopicRevision
+
+        with self.factory.begin() as session:
+            uid = self.make_user(session).user_id
+        with (
+            self.assertRaisesRegex(RuntimeError, "deliberate rollback"),
+            self.factory.begin() as session,
+        ):
+            check_and_bump_revisions(
+                session, uid, ["preference.language"], {"preference.language": 0}, {}
+            )
+            ProfileStore(uid, session, writable=True).backend().write(
+                topic_path("preference.language"), "must roll back"
+            )
+            raise RuntimeError("deliberate rollback")
+        with self.factory() as session:
+            self.assertEqual(ProfileStore(uid, session).facts(), {})
+            self.assertIsNone(session.get(MemoryTopicRevision, (uid, "preference.language")))
+
     @classmethod
     def setUpClass(cls):
         assert TEST_URL is not None
@@ -78,6 +123,47 @@ class MemoryMySQLTest(unittest.TestCase):
                 chat = cls.make_chat(session, old.user_id)
                 q = cls.make_question(session, chat.chat_session_id, "old fact")
                 cls.legacy_message_id = q.message_id
+            command.upgrade(Config("alembic.ini"), "20261012_0003")
+            with cls.factory.begin() as session:
+                old = session.get(User, cls.legacy_user_id)
+                assert old is not None
+                q = session.get(Message, cls.legacy_message_id)
+                assert q is not None
+                now = utcnow()
+                session.add_all(
+                    [
+                        AgentMemory(
+                            user_id=old.user_id,
+                            memory_key="personal.long_term_goal",
+                            memory_type="PERSONAL_BACKGROUND",
+                            summary="完成一个长期项目",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        AgentMemory(
+                            user_id=old.user_id,
+                            memory_key="preference.conversation_tone",
+                            memory_type="DAILY_PREFERENCE",
+                            summary="自然一点",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        AgentMemory(
+                            user_id=old.user_id,
+                            memory_key="personal.interests",
+                            memory_type="PERSONAL_BACKGROUND",
+                            summary="摄影",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        MemoryTopicRevision(
+                            user_id=old.user_id,
+                            memory_key="personal.long_term_goal",
+                            revision=3,
+                            source_message_id=q.message_id,
+                        ),
+                    ]
+                )
             command.upgrade(Config("alembic.ini"), "head")
 
     @classmethod
@@ -157,6 +243,28 @@ class MemoryMySQLTest(unittest.TestCase):
             self.user = self.make_user(session)
             self.chat = self.make_chat(session, self.user.user_id)
         self.settings = MemorySettings.from_sources(_env_file=None, global_daily_limit=1000)
+
+    def test_topic_migration_maps_teaching_preferences_and_removes_personal_topics(self):
+        with self.factory() as session:
+            rows = {
+                row.memory_key: row
+                for row in session.scalars(
+                    select(AgentMemory).where(AgentMemory.user_id == self.legacy_user_id)
+                )
+            }
+            self.assertEqual(rows["learning.goal"].summary, "完成一个长期项目")
+            self.assertEqual(rows["preference.explanation_style"].summary, "自然一点")
+            self.assertNotIn("personal.interests", rows)
+            revisions = {
+                row.memory_key: row
+                for row in session.scalars(
+                    select(MemoryTopicRevision).where(
+                        MemoryTopicRevision.user_id == self.legacy_user_id
+                    )
+                )
+            }
+            self.assertEqual(revisions["learning.goal"].revision, 3)
+            self.assertNotIn("personal.long_term_goal", revisions)
 
     def enqueue(self, content="我喜欢中文解释"):
         with self.factory.begin() as session:
@@ -339,10 +447,65 @@ class MemoryMySQLTest(unittest.TestCase):
             assert job is not None
             self.assertEqual(job.error_code, "MEMORY_SOURCE_TOO_LARGE")
 
+    def test_execution_caches_one_graph_per_conversation_for_same_user(self):
+        with self.factory.begin() as session:
+            other_chat_id = str(self.make_chat(session, self.user.user_id).chat_session_id)
+
+        async def run():
+            provider = ChatAgentProvider()
+            registry = GenerationRegistry()
+            models = [
+                MemoryModel(responses=[answer("A answer one"), answer("A answer two")]),
+                MemoryModel(responses=[answer("B answer one")]),
+            ]
+
+            async def emit(event):
+                pass
+
+            user = UserResponse.model_validate(self.user)
+            with (
+                tracing_context(enabled=False),
+                patch(
+                    "app.agent.deepseek_protocol.ProtocolChatDeepSeek", side_effect=models
+                ) as constructor,
+            ):
+                for chat_id, content in [
+                    (str(self.chat.chat_session_id), "session-A-first"),
+                    (other_chat_id, "session-B-first"),
+                    (str(self.chat.chat_session_id), "session-A-second"),
+                ]:
+                    result = await execute_chat_turn(
+                        user,
+                        chat_id,
+                        SendMessageRequest(content=content, client_message_key=str(uuid4())),
+                        self.factory,
+                        registry,
+                        model_settings=model_settings(),
+                        tracing_settings=TracingSettings.from_sources(
+                            _env_file=None, tracing=False
+                        ),
+                        input_policy=policy_for_model("deepseek-v4-pro"),
+                        check_new_message=lambda _: None,
+                        on_event=emit,
+                        agent_provider=provider,
+                    )
+                    from app.schemas import MessageDoneData
+
+                    self.assertIsInstance(result, MessageDoneData)
+                self.assertEqual(constructor.call_count, 2)
+            self.assertEqual(len(models[0]._seen), 2)
+            self.assertEqual(len(models[1]._seen), 1)
+            self.assertIn("session-A-first", str(models[0]._seen[-1]))
+            self.assertNotIn("session-B-first", str(models[0]._seen))
+            self.assertNotIn("session-A-first", str(models[1]._seen))
+            self.assertNotIn("A answer one", str(models[1]._seen))
+
+        asyncio.run(run())
+
     def test_real_execution_persists_protocol_and_replays_it(self):
         async def run():
             fact = {
-                "memory_key": "personal.interests",
+                "memory_key": "learning.goal",
                 "summary": "热爱学习",
                 "source_quote": "我热爱学习",
             }
@@ -354,6 +517,7 @@ class MemoryMySQLTest(unittest.TestCase):
                 ]
             )
             registry = GenerationRegistry()
+            provider = ChatAgentProvider()
             quota = GenerationQuota(GenerationQuotaSettings.from_sources(_env_file=None))
             events = []
 
@@ -363,7 +527,9 @@ class MemoryMySQLTest(unittest.TestCase):
             user = UserResponse.model_validate(self.user)
             with (
                 tracing_context(enabled=False),
-                patch("app.agent.deepseek_protocol.ProtocolChatDeepSeek", return_value=model),
+                patch(
+                    "app.agent.deepseek_protocol.ProtocolChatDeepSeek", return_value=model
+                ) as constructor,
             ):
                 for text in ("请记住我热爱学习", "what do you remember?"):
                     result = await execute_chat_turn(
@@ -380,6 +546,7 @@ class MemoryMySQLTest(unittest.TestCase):
                         check_new_message=lambda _: None,
                         on_event=emit,
                         quota=quota,
+                        agent_provider=provider,
                     )
                     from app.schemas import MessageDoneData
 
@@ -416,7 +583,14 @@ class MemoryMySQLTest(unittest.TestCase):
                             result.assistant_message.message_id,
                             self.factory,
                         )
+            constructor.assert_called_once()
             self.assertEqual(len(model._seen), 3)
+            self.assertNotIn("热爱学习", model._seen[0][0].text)
+            self.assertIn("热爱学习", model._seen[-1][0].text)
+            self.assertEqual(
+                [e.step for e in events if e.event_name == "model_step" and e.phase == "start"],
+                [1, 2, 1],
+            )
             self.assertTrue(any(isinstance(m, ToolMessage) for m in model._seen[-1]))
             self.assertTrue(any(e.event_name == "model_step" and e.phase == "tool" for e in events))
             with self.factory() as session:

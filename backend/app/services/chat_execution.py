@@ -10,10 +10,11 @@ from langchain_core.messages import messages_to_dict
 from openai import APITimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.agent.factory import build_chat_agent
+from app.agent.factory import ChatAgentProvider, build_chat_agent
 from app.agent.input_policy import AgentInputPolicy
 from app.agent.orchestrator import TurnMemory, validate_protocol
 from app.agent.output import extract_visible_chunk, managed_agent_stream
+from app.agent.run_context import prepare_run_context
 from app.agent.tracing import async_agent_tracing
 from app.core.async_work import complete_in_thread
 from app.core.config import ModelSettings, TracingSettings
@@ -67,8 +68,9 @@ async def execute_chat_turn(
     input_policy: AgentInputPolicy,
     check_new_message: Callable[[SendMessageRequest], None],
     on_event: Callable[[ChatEvent], Awaitable[None]],
-    timeout_seconds: float = 120,
+    timeout_seconds: float = 200,
     quota: GenerationQuota | None = None,
+    agent_provider: ChatAgentProvider | None = None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """调用方先认证，传应用共享 registry 和真实限流检查。严禁作为匿名公开模型代理。
 
@@ -96,6 +98,7 @@ async def execute_chat_turn(
         on_event=on_event,
         timeout_seconds=timeout_seconds,
         quota=quota,
+        agent_provider=agent_provider,
     )
 
 
@@ -114,6 +117,7 @@ async def execute_chat_retry(
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float = 120,
     quota: GenerationQuota | None = None,
+    agent_provider: ChatAgentProvider | None = None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """重试原问题；不是发送同样文字的新消息，也不是重新生成成功答案。
 
@@ -141,6 +145,7 @@ async def execute_chat_retry(
         on_event=on_event,
         timeout_seconds=timeout_seconds,
         quota=quota,
+        agent_provider=agent_provider,
     )
 
 
@@ -155,6 +160,7 @@ async def _execute_with_scope(
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float,
     quota: GenerationQuota | None,
+    agent_provider: ChatAgentProvider | None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """两种准入之后走同一条记忆→回答→保存→清理路径，避免维护两套生成逻辑。"""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -210,7 +216,20 @@ async def _execute_with_scope(
                 async with async_agent_tracing(tracing_settings):
                     turn = TurnMemory(accepted, session_factory, registry, progress)
                     prepared = await turn.prepare()
-                    agent = build_chat_agent(model_settings, prepared, turn)
+                    context = prepare_run_context(prepared, turn)
+                    # Select this conversation's graph only after admission has
+                    # verified ownership; never share a graph across sessions.
+                    # Standalone callers may omit it for one-shot execution.
+                    agent = (
+                        agent_provider.get(
+                            model_settings,
+                            input_policy,
+                            user_id=accepted.prepared_input.user_id,
+                            session_id=accepted.session_id,
+                        )
+                        if agent_provider is not None
+                        else build_chat_agent(model_settings, input_policy)
+                    )
                     await progress("agent_running")
                     stream = agent.astream(
                         {"messages": turn.input_messages},
@@ -219,6 +238,7 @@ async def _execute_with_scope(
                             "metadata": {"attempt_id": accepted.attempt_id},
                         },
                         stream_mode=["messages", "custom"],
+                        context=context,
                         subgraphs=False,
                     )
                     async with managed_agent_stream(stream):

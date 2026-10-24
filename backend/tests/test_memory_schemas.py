@@ -55,9 +55,9 @@ class MemorySchemaTest(unittest.TestCase):
         self.assertEqual(row.memory_id, 301)  # 格式化响应不修改 ORM 对象。
         self.assertNotIn("user_id", response.model_dump())
 
-    def test_five_categories_match_all_database_topics(self):
+    def test_three_categories_match_all_database_topics(self):
         self.assertEqual(set(get_args(MemoryType)), set(MEMORY_TOPIC_TYPES.values()))
-        self.assertEqual(len(get_args(MemoryType)), 5)
+        self.assertEqual(len(get_args(MemoryType)), 3)
         for key, category in MEMORY_TOPIC_TYPES.items():
             with self.subTest(topic=key):
                 response = MemoryResponse.model_validate(
