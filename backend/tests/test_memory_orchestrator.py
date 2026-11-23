@@ -8,24 +8,27 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+from deepagents.backends.protocol import ReadResult
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langgraph.checkpoint.memory import InMemorySaver
 from langsmith import tracing_context
 from pydantic import PrivateAttr
 from test_chat_agent_factory import prepared, settings
 
 from app.agent.budget_middleware import AgentToolUseNotAllowedError
 from app.agent.consolidation import extract_candidates, memory_worker
-from app.agent.deepseek_protocol import ProtocolChatDeepSeek
-from app.agent.factory import build_chat_agent
-from app.agent.orchestrator import TurnMemory, compact_profile, validate_protocol
+from app.agent.conversation_context import SUMMARY_INSTRUCTIONS
+from app.agent.deepseek_protocol import ReasoningReplayChatDeepSeek
+from app.agent.factory import compile_chat_graph
+from app.agent.orchestrator import ChatAttemptState, compact_profile, validate_protocol
 from app.agent.profile_memory_tool import contains_sensitive_memory, is_explicit_memory_request
-from app.agent.run_context import prepare_run_context
+from app.agent.run_context import build_chat_run_dependencies
 from app.agent.teaching_skill import TEACHING_SKILL_PATH, load_teaching_skill
 from app.core.config import MemorySettings, TracingSettings
 from app.services.errors import ContextTooLargeError
-from app.services.memory_tasks import ClaimedMemoryJob
+from app.services.memory_tasks import ClaimedConsolidationJob
 from app.services.message_submission import AcceptedMessage
 from testing_support import make_runtime
 
@@ -42,12 +45,20 @@ def answer(text="answer", *, tool=None, args=None, ident="call-1"):
 class MemoryModel(FakeMessagesListChatModel):
     _seen: list = PrivateAttr(default_factory=list)
     _tools: list = PrivateAttr(default_factory=list)
+    _summary_seen: list = PrivateAttr(default_factory=list)
 
     def bind_tools(self, tools, **kwargs):
         self._tools.append([t.name for t in tools])
         return self
 
     def _generate(self, messages, *args, **kwargs):
+        if messages[0].text == SUMMARY_INSTRUCTIONS:
+            # Native compaction is a distinct model request, not the next tool
+            # response from this fixture's scripted conversation cursor.
+            self._summary_seen.append(messages)
+            return ChatResult(
+                generations=[ChatGeneration(message=answer("Summary: teaching discussion."))]
+            )
         self._seen.append(messages)
         return super()._generate(messages, *args, **kwargs)
 
@@ -75,20 +86,21 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.network.start()
         self.addCleanup(self.network.stop)
         accepted = AcceptedMessage("1", "10", str(uuid4()), prepared())
-        self.turn = TurnMemory(accepted, MagicMock(), MagicMock(), AsyncMock())
+        self.attempt_state = ChatAttemptState(accepted, MagicMock(), MagicMock(), AsyncMock())
 
     async def run_graph(self, responses):
         model = MemoryModel(responses=responses)
-        self.turn.facts = {"learning.goal": "likes reading"}
-        self.turn.input_messages = [HumanMessage(content="Remember that I like learning")]
-        with patch("app.agent.deepseek_protocol.ProtocolChatDeepSeek", return_value=model):
-            snapshot = prepared(compact_profile(self.turn.facts))
-            agent = build_chat_agent(settings(), snapshot.policy)
+        self.attempt_state.profile_facts = {"learning.goal": "likes reading"}
+        input_messages = [HumanMessage(content="Remember that I like learning")]
+        with patch("app.agent.deepseek_protocol.ReasoningReplayChatDeepSeek", return_value=model):
+            snapshot = prepared(compact_profile(self.attempt_state.profile_facts))
+            agent = compile_chat_graph(settings(), snapshot.policy, checkpointer=InMemorySaver())
         events = []
         async for item in agent.astream(
-            {"messages": self.turn.input_messages},
+            {"messages": input_messages},
+            {"configurable": {"thread_id": "orchestrator-test"}},
             stream_mode=["messages", "custom"],
-            context=prepare_run_context(snapshot, self.turn),
+            context=build_chat_run_dependencies(snapshot, self.attempt_state),
         ):
             events.append(item)
         return model, events
@@ -96,8 +108,8 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
     async def test_ordinary_turn_has_one_call_and_full_reasoning(self):
         model, events = await self.run_graph([answer()])
         self.assertEqual(len(model._seen), 1)
-        self.assertEqual(len(self.turn.protocol), 1)
-        validate_protocol(self.turn.protocol)
+        self.assertEqual(len(self.attempt_state.protocol_messages), 1)
+        validate_protocol(self.attempt_state.protocol_messages)
         self.assertEqual([v["phase"] for k, v in events if k == "custom"], ["start", "final"])
         self.assertEqual(
             set(model._tools[0]), {"save_profile_facts", "read_profile_topics", "read_file"}
@@ -117,9 +129,9 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tool_messages), 1)
         self.assertIn("## Choose the help", tool_messages[0].text)
         self.assertIn("直接讲解", tool_messages[0].text)
-        self.assertEqual(self.turn.read_calls, 0)
-        self.assertEqual(self.turn.calls, 2)
-        validate_protocol(self.turn.protocol)
+        self.assertEqual(self.attempt_state.profile_read_count, 0)
+        self.assertEqual(self.attempt_state.model_call_count, 2)
+        validate_protocol(self.attempt_state.protocol_messages)
 
     async def test_skill_reader_cannot_access_other_paths(self):
         for path in (
@@ -129,11 +141,15 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(path=path), self.assertRaises(AgentToolUseNotAllowedError):
                 await self.run_graph([answer(tool="read_file", args={"file_path": path})])
-            self.assertFalse(any(isinstance(m, ToolMessage) for m in self.turn.protocol))
+            self.assertFalse(
+                any(isinstance(m, ToolMessage) for m in self.attempt_state.protocol_messages)
+            )
 
     async def test_skill_read_memory_read_save_and_answer_fit_four_calls(self):
-        self.turn.bound.explicit_request = True
-        self.turn.bound.save = AsyncMock(return_value="Memory save confirmed.")
+        self.attempt_state.profile_write_tool.explicit_request = True
+        self.attempt_state.profile_write_tool.save = AsyncMock(
+            return_value="Memory save confirmed."
+        )
         fact = {
             "memory_key": "learning.goal",
             "summary": "likes reading and learning",
@@ -152,14 +168,21 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         self.assertEqual(len(model._seen), 4)
-        self.turn.bound.save.assert_awaited_once()
-        validate_protocol(self.turn.protocol)
+        self.attempt_state.profile_write_tool.save.assert_awaited_once()
+        validate_protocol(self.attempt_state.protocol_messages)
 
     async def test_skill_contents_are_budgeted_before_followup_model_call(self):
         with (
             patch(
-                "app.agent.run_context.load_teaching_skill",
-                return_value=load_teaching_skill() + "\n" + "x" * 70_000,
+                "deepagents.backends.filesystem.FilesystemBackend.aread",
+                new=AsyncMock(
+                    return_value=ReadResult(
+                        file_data={
+                            "content": load_teaching_skill() + "\n" + "x" * 70_000,
+                            "encoding": "utf-8",
+                        }
+                    )
+                ),
             ),
             self.assertRaises(ContextTooLargeError),
         ):
@@ -169,10 +192,16 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
                     answer(),
                 ]
             )
+        # The oversized retained skill result must not reach a follow-up
+        # answer model, even when the preceding history was summarized.
+        self.assertEqual(len(self.attempt_state.protocol_messages), 2)
+        self.assertIsInstance(self.attempt_state.protocol_messages[-1], ToolMessage)
 
     async def test_read_save_answer_in_same_graph(self):
-        self.turn.bound.explicit_request = True
-        self.turn.bound.save = AsyncMock(return_value="Memory save confirmed.")
+        self.attempt_state.profile_write_tool.explicit_request = True
+        self.attempt_state.profile_write_tool.save = AsyncMock(
+            return_value="Memory save confirmed."
+        )
         fact = {
             "memory_key": "learning.goal",
             "summary": "likes reading and learning",
@@ -186,9 +215,9 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         self.assertEqual(len(model._seen), 3)
-        self.assertEqual(len(self.turn.protocol), 5)
-        validate_protocol(self.turn.protocol)
-        self.turn.bound.save.assert_awaited_once()
+        self.assertEqual(len(self.attempt_state.protocol_messages), 5)
+        validate_protocol(self.attempt_state.protocol_messages)
+        self.attempt_state.profile_write_tool.save.assert_awaited_once()
         phases = [v["phase"] for k, v in events if k == "custom"]
         self.assertEqual(phases, ["start", "tool", "start", "tool", "start", "final"])
 
@@ -208,8 +237,8 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
                     for i in range(4)
                 ]
             )
-        self.assertEqual(self.turn.calls, 4)
-        self.assertEqual(self.turn.read_calls, 3)
+        self.assertEqual(self.attempt_state.model_call_count, 4)
+        self.assertEqual(self.attempt_state.profile_read_count, 3)
 
     async def test_immediate_save_requires_explicit_request_and_full_topic_read(self):
         fact = {
@@ -217,28 +246,28 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
             "summary": "likes learning",
             "source_quote": "likes learning",
         }
-        self.turn.bound.save = AsyncMock()
-        self.assertIn("No explicit", await self.turn.save([fact]))
-        self.turn.bound.explicit_request = True
-        self.turn.facts = {"learning.goal": "likes reading"}
-        self.assertIn("Read the full", await self.turn.save([fact]))
-        self.turn.bound.save.assert_not_awaited()
+        self.attempt_state.profile_write_tool.save = AsyncMock()
+        self.assertIn("No explicit", await self.attempt_state.save_profile_facts([fact]))
+        self.attempt_state.profile_write_tool.explicit_request = True
+        self.attempt_state.profile_facts = {"learning.goal": "likes reading"}
+        self.assertIn("Read the full", await self.attempt_state.save_profile_facts([fact]))
+        self.attempt_state.profile_write_tool.save.assert_not_awaited()
 
-    async def test_prepare_quotes_legacy_messages_and_uses_short_profile(self):
+    async def test_prepare_loads_profile_without_rebuilding_chat_history(self):
         factory = MagicMock()
         session = factory.return_value.__enter__.return_value
         session.scalars.return_value.all.return_value = []
         session.scalars.return_value.__iter__.return_value = iter([])
         session.get.return_value = None
-        self.turn.factory = factory
-        snapshot = await self.turn.prepare()
+        self.attempt_state.session_factory = factory
+        snapshot = await self.attempt_state.load_profile_snapshot()
         self.assertLessEqual(len(snapshot.profile_memory.encode()), 4096)
-        self.assertTrue(all(isinstance(m, HumanMessage) for m in self.turn.input_messages))
-        self.assertIn("Untrusted legacy", self.turn.input_messages[0].content)
+        self.assertFalse(hasattr(self.attempt_state, "input_messages"))
+        self.assertEqual(snapshot.messages, self.attempt_state.accepted.admission_snapshot.messages)
 
     async def test_background_graph_one_call_and_empty_batch(self):
         model = MemoryModel(responses=[answer(tool="submit_memory_candidates", args={"facts": []})])
-        job = ClaimedMemoryJob(
+        job = ClaimedConsolidationJob(
             "j", 1, ({"message_id": 1, "session_id": 1, "content": "hello"},), {}, {}
         )
         with patch("app.agent.consolidation.ChatDeepSeek", return_value=model):
@@ -250,18 +279,18 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         message.response_metadata["finish_reason"] = "length"
         with self.assertRaisesRegex(ValueError, "Incomplete model response"):
             await self.run_graph([message])
-        self.assertEqual(self.turn.read_calls, 0)
+        self.assertEqual(self.attempt_state.profile_read_count, 0)
 
     async def test_missing_provider_reasoning_never_executes_tool(self):
         message = answer(tool="read_profile_topics", args={"topics": ["learning.goal"]})
         message.additional_kwargs = {}
         with self.assertRaisesRegex(TypeError, "reasoning_content"):
             await self.run_graph([message])
-        self.assertEqual(self.turn.read_calls, 0)
+        self.assertEqual(self.attempt_state.profile_read_count, 0)
 
     async def test_background_budget_rejects_before_model(self):
         model = MemoryModel(responses=[answer(tool="submit_memory_candidates", args={"facts": []})])
-        job = ClaimedMemoryJob("j", 1, ({"content": "a" * 70_000},), {}, {})
+        job = ClaimedConsolidationJob("j", 1, ({"content": "a" * 70_000},), {}, {})
         with (
             patch("app.agent.consolidation.ChatDeepSeek", return_value=model),
             self.assertRaises(ContextTooLargeError),
@@ -281,7 +310,7 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
             database_guard=MagicMock(),
             quota=SimpleNamespace(settings=SimpleNamespace(global_concurrency_limit=2)),
         )
-        job = ClaimedMemoryJob("job", 1, (), {}, {})
+        job = ClaimedConsolidationJob("job", 1, (), {}, {})
         with (
             patch("app.agent.consolidation.claim_memory_job", return_value=job),
             patch("app.agent.consolidation.extract_candidates", side_effect=wait_for_cancel),
@@ -305,7 +334,7 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancellation_waits_for_claim_commit_before_settlement(self):
         entered, release = threading.Event(), threading.Event()
-        job = ClaimedMemoryJob("job", 1, (), {}, {})
+        job = ClaimedConsolidationJob("job", 1, (), {}, {})
 
         def claim(*_):
             entered.set()
@@ -382,7 +411,9 @@ class ProtocolTest(unittest.TestCase):
 
     def test_wire_request_preserves_actual_reasoning_and_pairs(self):
         cfg = settings()
-        model = ProtocolChatDeepSeek(model=cfg.name, api_key=cfg.api_key, base_url=cfg.base_url)
+        model = ReasoningReplayChatDeepSeek(
+            model=cfg.name, api_key=cfg.api_key, base_url=cfg.base_url
+        )
         messages = [
             HumanMessage(content="remember"),
             answer(tool="save_profile_facts"),

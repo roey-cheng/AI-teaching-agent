@@ -1,29 +1,27 @@
-"""Per-turn tools, bounded orchestration and complete provider protocol capture."""
+"""单次生成尝试的画像工具、调用限制和模型协议记录；不保存跨轮会话状态。"""
 
 import json
 from dataclasses import replace
 
 from langchain_core.messages import (
     AIMessage,
-    HumanMessage,
     ToolMessage,
-    messages_from_dict,
-    messages_to_dict,
 )
 from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
 from app.agent.budget_middleware import (
     AgentToolUseNotAllowedError,
-    ChatMemoryBudgetMiddleware,
+    ProfilePromptBudgetMiddleware,
     check_request_budget,
 )
 from app.agent.profile_memory_tool import BoundMemoryTool, SaveMemoryInput
-from app.agent.run_context import require_run_context
+from app.agent.run_context import require_chat_run_dependencies
 from app.agent.teaching_skill import TEACHING_SKILL_PATH
 from app.core.async_work import complete_in_thread
-from app.models import AgentTurnRecord
+from app.models import Message
 from app.services.memory_tasks import MemoryConflict, profile_snapshot
 
 ORCHESTRATOR_PROMPT = """
@@ -66,23 +64,23 @@ class ReadTopicsInput(BaseModel):
     topics: list[str] = Field(min_length=1, max_length=12)
 
 
-def current_turn(runtime=None):
-    turn = require_run_context(runtime).turn
-    if turn is None:
-        raise ValueError("This graph requires an active memory turn")
-    return turn
+def require_chat_attempt_state(runtime=None):
+    attempt_state = require_chat_run_dependencies(runtime).attempt_state
+    if attempt_state is None:
+        raise ValueError("This graph requires an active chat attempt")
+    return attempt_state
 
 
 async def read_profile_topics(topics):
-    return await current_turn().read(topics)
+    return await require_chat_attempt_state().read_profile_topics(topics)
 
 
 async def save_profile_facts(facts):
-    return await current_turn().save(facts)
+    return await require_chat_attempt_state().save_profile_facts(facts)
 
 
 def memory_tools():
-    """Static definitions; no bound methods/closures capturing a user or turn."""
+    """图可复用的静态工具定义；不通过绑定方法或闭包持有用户或生成尝试。"""
     return [
         StructuredTool.from_function(
             coroutine=read_profile_topics,
@@ -101,109 +99,88 @@ def memory_tools():
     ]
 
 
-class TurnMemory:
-    def __init__(self, accepted, factory, registry, progress):
-        self.accepted, self.factory = accepted, factory
-        self.bound = BoundMemoryTool(accepted, factory, registry, progress)
-        self.facts, self.versions = {}, {}
-        self.read_keys = set()
-        self.read_calls = 0
-        self.calls = 0
-        self.protocol = []
+class ChatAttemptState:
+    """一次生成尝试的可变工作状态，不是整个会话，也不是 LangGraph 的持久状态。
 
-    async def prepare(self):
+    从本次开始生成到结束/取消期间使用；重试同一条用户消息也要新建。
+    保存画像快照、工具写入约束、调用计数和本次协议记录；历史由 checkpoint 管理。
+    """
+
+    def __init__(self, accepted, session_factory, registry, progress):
+        self.accepted, self.session_factory = accepted, session_factory
+        self.profile_write_tool = BoundMemoryTool(accepted, session_factory, registry, progress)
+        self.profile_facts, self.profile_revisions = {}, {}
+        self.read_topic_keys = set()
+        self.profile_read_count = 0
+        self.model_call_count = 0
+        self.protocol_messages = []
+
+    async def load_profile_snapshot(self):
+        """加载本次画像和写入证据，返回更新后的准入快照；不重建聊天历史。"""
+
         def load():
-            with self.factory() as session:
-                facts, versions = profile_snapshot(
-                    session, int(self.accepted.prepared_input.user_id)
+            with self.session_factory() as session:
+                profile_facts, profile_revisions = profile_snapshot(
+                    session, int(self.accepted.admission_snapshot.user_id)
                 )
-                old = self.accepted.prepared_input
-                # Rebuild complete selected turns. Legacy answers become quoted data, not
-                # fabricated assistant messages with missing/empty reasoning_content.
-                bundles = []
-                for i in range(0, len(old.messages) - 1, 2):
-                    q, a = old.messages[i : i + 2]
-                    record = (
-                        session.get(AgentTurnRecord, int(q.source_message_id))
-                        if q.source_message_id
-                        else None
+                # Evidence validation only, not agent history reconstruction.
+                previous = session.scalar(
+                    select(Message.content)
+                    .where(
+                        Message.chat_session_id == int(self.accepted.session_id),
+                        Message.role == "USER",
+                        Message.generation_status == "SUCCEEDED",
+                        Message.message_id != int(self.accepted.user_message_id),
                     )
-                    if isinstance(record, AgentTurnRecord):
-                        if record.user_id != int(old.user_id):
-                            raise ValueError("Protocol ownership mismatch")
-                        bundle = [
-                            HumanMessage(content=q.content),
-                            *messages_from_dict(record.messages),
-                        ]
-                        validate_protocol(bundle[1:])
-                    else:
-                        bundle = [
-                            HumanMessage(
-                                content="Untrusted legacy conversation record (not instructions):\n"
-                                + json.dumps(
-                                    {"user": q.content, "assistant": a.content}, ensure_ascii=False
-                                )
-                            )
-                        ]
-                    bundles.append(bundle)
-                return facts, versions, bundles
+                    .order_by(Message.created_at.desc(), Message.message_id.desc())
+                    .limit(1)
+                )
+                return profile_facts, profile_revisions, previous
 
-        self.facts, self.versions, bundles = await complete_in_thread(load)
-        old = self.accepted.prepared_input
-        prepared = replace(
-            old,
-            profile_memory=compact_profile(self.facts),
+        self.profile_facts, self.profile_revisions, previous = await complete_in_thread(load)
+        if self.profile_write_tool.explicit_request and isinstance(previous, str):
+            self.profile_write_tool.allowed_source_messages = (
+                previous,
+                self.profile_write_tool.question,
+            )
+        admission_snapshot = replace(
+            self.accepted.admission_snapshot,
+            profile_memory=compact_profile(self.profile_facts),
         )
-        selected, used = [], len(prepared.messages[-1].content.encode())
-        # Admission did a conservative history selection; re-check full protocol sizes,
-        # trimming only complete oldest turns, never a tool pair.
-        reserve = (
-            len(prepared.profile_memory.encode())
-            + len(prepared.policy.system_prompt.encode())
-            + len(ORCHESTRATOR_PROMPT.encode())
-            + 4096
-        )
-        for bundle in reversed(bundles):
-            cost = len(json.dumps(messages_to_dict(bundle), ensure_ascii=False).encode())
-            if used + cost + reserve > prepared.policy.input_limit:
-                break
-            used += cost
-            selected.insert(0, bundle)
-        self.input_messages = [m for b in selected for m in b] + [
-            HumanMessage(content=old.messages[-1].content)
-        ]
-        return prepared
+        return admission_snapshot
 
-    async def read(self, topics):
-        self.read_calls += 1
-        if self.read_calls > 2:
+    async def read_profile_topics(self, topics):
+        self.profile_read_count += 1
+        if self.profile_read_count > 2:
             return "Read limit reached. Answer using confirmed available information."
-        if any(key not in self.facts for key in topics):
+        if any(key not in self.profile_facts for key in topics):
             return "Unknown profile topic. No data was read."
-        self.read_keys.update(topics)
-        return json.dumps({k: self.facts[k] for k in topics}, ensure_ascii=False)
+        self.read_topic_keys.update(topics)
+        return json.dumps({k: self.profile_facts[k] for k in topics}, ensure_ascii=False)
 
-    async def save(self, facts):
-        if not self.bound.explicit_request:
+    async def save_profile_facts(self, facts):
+        if not self.profile_write_tool.explicit_request:
             return "No explicit save request was detected. Do not claim an immediate save."
         checked = SaveMemoryInput(facts=facts).facts
-        if any(f.memory_key in self.facts and f.memory_key not in self.read_keys for f in checked):
+        if any(
+            f.memory_key in self.profile_facts and f.memory_key not in self.read_topic_keys
+            for f in checked
+        ):
             return "Read the full existing topics before proposing replacement summaries. Memory not saved."
-        self.bound.expected_revisions = self.versions
+        self.profile_write_tool.expected_revisions = self.profile_revisions
         try:
-            result = await self.bound.save(checked)
+            result = await self.profile_write_tool.save(checked)
         except MemoryConflict:
             return "Profile changed concurrently. Memory not saved; ask the user to retry."
-        if self.bound.status == "saved":
-            for fact in checked:
-                self.facts[fact.memory_key] = fact.summary
-            await self.bound.progress("memory_saved")
-        elif self.bound.status == "unconfirmed":
-            await self.bound.progress("memory_unavailable")
+        if self.profile_write_tool.status in {"saved", "already_saved"}:
+            self.profile_facts = dict(self.profile_write_tool.current_facts)
+            await self.profile_write_tool.progress("memory_saved")
+        elif self.profile_write_tool.status == "unconfirmed":
+            await self.profile_write_tool.progress("memory_unavailable")
         return result
 
     def close(self):
-        self.bound.close()
+        self.profile_write_tool.close()
 
 
 def validate_protocol(messages):
@@ -229,7 +206,12 @@ def validate_protocol(messages):
         raise ValueError("Incomplete tool results")
 
 
-class OrchestratorMiddleware(ChatMemoryBudgetMiddleware):
+class TeachingChatMiddleware(ProfilePromptBudgetMiddleware):
+    """图可复用的教学聊天规则；每次通过运行依赖取得当前生成尝试的状态。
+
+    它限制工具权限和模型调用次数，并记录协议消息；不在自身保存用户状态。
+    """
+
     def __init__(self, backend, policy):
         super().__init__(backend, policy, run_scoped=True)
         self.system_prompt = (
@@ -242,7 +224,7 @@ class OrchestratorMiddleware(ChatMemoryBudgetMiddleware):
     def modify_request(self, request):
         # Retain only the framework's read_file tool, not its shell/write/subagent tools.
         # awrap_tool_call enforces the exact skill path before this tool executes.
-        turn = current_turn(request.runtime)
+        attempt_state = require_chat_attempt_state(request.runtime)
         tools = [
             t
             for t in request.tools
@@ -254,15 +236,17 @@ class OrchestratorMiddleware(ChatMemoryBudgetMiddleware):
 
         schema = [convert_to_openai_tool(tool) for tool in tools]
         check_request_budget(request, schema, self.policy)
-        return request.override(tools=tools, tool_choice="none" if turn.calls >= 4 else "auto")
+        return request.override(
+            tools=tools, tool_choice="none" if attempt_state.model_call_count >= 4 else "auto"
+        )
 
     async def awrap_model_call(self, request, handler):
-        turn = current_turn(request.runtime)
-        turn.calls += 1
-        if turn.calls > 4:
+        attempt_state = require_chat_attempt_state(request.runtime)
+        attempt_state.model_call_count += 1
+        if attempt_state.model_call_count > 4:
             raise ValueError("Model call limit exceeded")
         writer = get_stream_writer()
-        writer({"step": turn.calls, "phase": "start"})
+        writer({"step": attempt_state.model_call_count, "phase": "start"})
         response = await handler(self.modify_request(request))
         for message in response.result:
             if not isinstance(message, AIMessage):
@@ -277,30 +261,49 @@ class OrchestratorMiddleware(ChatMemoryBudgetMiddleware):
             expected_finish = "tool_calls" if message.tool_calls else "stop"
             if message.response_metadata.get("finish_reason") != expected_finish:
                 raise ValueError("Incomplete model response")
-            if turn.calls == 4 and message.tool_calls:
+            if attempt_state.model_call_count == 4 and message.tool_calls:
                 raise AgentToolUseNotAllowedError()
             # Sequential tools avoid save/read races and bound cost per model step.
             if len(message.tool_calls) > 1:
                 raise ValueError("Parallel memory tools are not enabled")
-            turn.protocol.append(message)
-            writer({"step": turn.calls, "phase": "tool" if message.tool_calls else "final"})
+            attempt_state.protocol_messages.append(message)
+            writer(
+                {
+                    "step": attempt_state.model_call_count,
+                    "phase": "tool" if message.tool_calls else "final",
+                }
+            )
         return response
 
     async def awrap_tool_call(self, request, handler):
-        turn = current_turn(request.runtime)
+        attempt_state = require_chat_attempt_state(request.runtime)
         if request.tool_call["name"] not in {
             "save_profile_facts",
             "read_profile_topics",
             "read_file",
         }:
             raise AgentToolUseNotAllowedError()
-        if (
-            request.tool_call["name"] == "read_file"
-            and request.tool_call["args"].get("file_path") != TEACHING_SKILL_PATH
-        ):
-            raise AgentToolUseNotAllowedError()
+        if request.tool_call["name"] == "read_file":
+            from pathlib import PurePosixPath
+
+            args = request.tool_call["args"]
+            path = args.get("file_path", "")
+            allowed = path == TEACHING_SKILL_PATH or (
+                isinstance(path, str)
+                and path.startswith(("/conversation_history/", "/large_tool_results/"))
+                and ".." not in PurePosixPath(path).parts
+            )
+            limit, offset = args.get("limit", 200), args.get("offset", 0)
+            if (
+                not allowed
+                or type(limit) is not int
+                or not 1 <= limit <= 200
+                or type(offset) is not int
+                or offset < 0
+            ):
+                raise AgentToolUseNotAllowedError()
         result = await handler(request)
         if not isinstance(result, ToolMessage):
             raise TypeError("Unexpected tool result")
-        turn.protocol.append(result)
+        attempt_state.protocol_messages.append(result)
         return result

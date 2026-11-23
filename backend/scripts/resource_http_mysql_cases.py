@@ -23,8 +23,8 @@ from app.models import (
     AuthSession,
     ChatSession,
     GenerationAttempt,
-    MemoryJob,
-    MemoryState,
+    MemoryConsolidationJob,
+    MemoryConsolidationState,
     MemoryTopicRevision,
     Message,
     User,
@@ -68,7 +68,12 @@ class ResourceHTTPFixture(unittest.TestCase):
         self.assertNotEqual(self.engine.url.port, 3306)
         if self.user_ids:
             with self.factory.begin() as session:
-                for model in (AgentTurnRecord, MemoryJob, MemoryState, MemoryTopicRevision):
+                for model in (
+                    AgentTurnRecord,
+                    MemoryConsolidationJob,
+                    MemoryConsolidationState,
+                    MemoryTopicRevision,
+                ):
                     session.execute(delete(model).where(model.user_id.in_(self.user_ids)))
                 session.execute(
                     delete(GenerationAttempt).where(GenerationAttempt.user_id.in_(self.user_ids))

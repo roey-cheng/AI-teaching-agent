@@ -17,10 +17,12 @@ from app.models import (
     ChatSession,
     GenerationAttempt,
     GenerationControl,
-    MemoryJob,
-    MemoryState,
+    MemoryConsolidationJob,
+    MemoryConsolidationState,
     MemoryTopicRevision,
+    MemoryWriteReceipt,
     Message,
+    PublishedChatCheckpoint,
     User,
 )
 from app.models.agent_memory import MEMORY_TOPIC_TYPES
@@ -37,6 +39,36 @@ def checks_for(model):
 
 
 class ChatModelsTest(unittest.TestCase):
+    def test_consolidation_model_renames_keep_sql_schema(self):
+        self.assertEqual(MemoryConsolidationState.__tablename__, "memory_consolidation_state")
+        self.assertEqual(MemoryConsolidationJob.__tablename__, "memory_consolidation_jobs")
+        self.assertEqual(
+            list(require_type(MemoryConsolidationState.__table__, Table).columns.keys()),
+            [
+                "user_id",
+                "cursor",
+                "pending_ids",
+                "dirty",
+                "last_activity_at",
+                "due_at",
+                "failures",
+                "paused",
+            ],
+        )
+        self.assertEqual(
+            list(require_type(MemoryConsolidationJob.__table__, Table).columns.keys()),
+            [
+                "job_id",
+                "user_id",
+                "quota_date",
+                "status",
+                "source_ids",
+                "created_at",
+                "finished_at",
+                "error_code",
+            ],
+        )
+
     def test_all_models_share_metadata_and_map_successfully(self):
         configure_mappers()
         models = (
@@ -48,9 +80,11 @@ class ChatModelsTest(unittest.TestCase):
             GenerationControl,
             GenerationAttempt,
             AgentTurnRecord,
-            MemoryJob,
-            MemoryState,
+            MemoryConsolidationJob,
+            MemoryConsolidationState,
             MemoryTopicRevision,
+            PublishedChatCheckpoint,
+            MemoryWriteReceipt,
         )
         self.assertEqual(set(Base.metadata.tables), {model.__tablename__ for model in models})
         for model in models:
@@ -122,6 +156,10 @@ class ChatModelsTest(unittest.TestCase):
                 "memory_consolidation_state.user_id": "users.user_id",
                 "memory_consolidation_jobs.user_id": "users.user_id",
                 "memory_topic_revisions.user_id": "users.user_id",
+                "chat_thread_heads.chat_session_id": "chat_sessions.chat_session_id",
+                "chat_thread_heads.user_id": "users.user_id",
+                "memory_write_receipts.question_id": "messages.message_id",
+                "memory_write_receipts.user_id": "users.user_id",
             }
         )
         for table in Base.metadata.tables.values():

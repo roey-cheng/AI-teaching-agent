@@ -10,7 +10,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
-from app.agent.budget_middleware import AgentToolUseNotAllowedError, ChatMemoryBudgetMiddleware
+from app.agent.budget_middleware import AgentToolUseNotAllowedError, ProfilePromptBudgetMiddleware
 from app.agent.input_policy import policy_for_model
 from app.agent.memory_backend import PROFILE_MEMORY_PATH, snapshot_backend
 from app.services.errors import ContextTooLargeError
@@ -19,7 +19,7 @@ from testing_support import require_value
 
 def middleware_and_request(policy=None, memory="喜欢中文"):
     policy = policy or policy_for_model("deepseek-v4-pro")
-    middleware = ChatMemoryBudgetMiddleware(snapshot_backend(memory), policy)
+    middleware = ProfilePromptBudgetMiddleware(snapshot_backend(memory), policy)
     request = ModelRequest(
         model=FakeListChatModel(responses=["unused"]),
         messages=[HumanMessage(content="question")],

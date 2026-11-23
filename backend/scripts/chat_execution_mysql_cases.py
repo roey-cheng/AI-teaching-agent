@@ -11,10 +11,12 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import Engine, event, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.agent.factory import SessionChatGraphCache
 from app.agent.input_policy import policy_for_model
 from app.core.config import ModelSettings, TracingSettings
 from app.db.session import build_session_factory
@@ -56,6 +58,7 @@ class ChatExecutionMySQLTest(unittest.IsolatedAsyncioTestCase):
         self.user = registered
         self.chat = create_chat_session(self.user, self.factory)
         self.registry = GenerationRegistry()
+        self.session_graph_cache = SessionChatGraphCache(InMemorySaver())
         self.request = SendMessageRequest.model_validate(
             {"client_message_key": str(uuid4()), "content": "Explain Python"}
         )
@@ -75,7 +78,7 @@ class ChatExecutionMySQLTest(unittest.IsolatedAsyncioTestCase):
             self.inputs.append(messages)
             self.assertEqual(
                 {tool["function"]["name"] for tool in kwargs["tools"]},
-                {"read_profile_topics", "save_profile_facts"},
+                {"read_profile_topics", "save_profile_facts", "read_file"},
             )
             self.assertEqual(kwargs["max_tokens"], self.policy.output_tokens)
             self.started.set()
@@ -123,6 +126,7 @@ class ChatExecutionMySQLTest(unittest.IsolatedAsyncioTestCase):
             "input_policy": self.policy,
             "check_new_message": self.check,
             "on_event": self.emit,
+            "session_graph_cache": self.session_graph_cache,
         }
         values.update(overrides)
         return await execute_chat_turn(**values)

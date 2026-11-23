@@ -28,6 +28,7 @@ from app.services.chat_execution import EventDeliveryError
 from app.services.errors import MemoryUnavailableError
 from app.services.generation_registry import GenerationRegistry
 from app.services.message_submission import AcceptedMessage
+from app.services.profile_memory import MemorySaveResult
 
 
 class MemoryToolSchemaTest(unittest.TestCase):
@@ -104,7 +105,7 @@ class MemoryToolSchemaTest(unittest.TestCase):
         )
         updated = with_memory_result(original, "profile" * 50, "saved", ("preference.language",))
         self.assertEqual([m.content for m in updated.messages], ["current"])
-        self.assertTrue(updated.history_truncated)
+        self.assertTrue(updated.input_history_trimmed)
         self.assertIn("confirmed saving", updated.policy.system_prompt)
         self.assertEqual(updated.policy.tool_definitions_json, "[]")
 
@@ -124,7 +125,7 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         }
         self.question = "以后请用中文解释"
         snapshot = replace(
-            prepared(), messages=(InputMessage("user", self.question),), history_rounds=0
+            prepared(), messages=(InputMessage("user", self.question),), included_history_turns=0
         )
         self.accepted = AcceptedMessage("1", "10", str(uuid4()), snapshot)
         self.factory, self.registry = MagicMock(), GenerationRegistry()
@@ -177,13 +178,24 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(patcher.stop)
         save = patch(
             "app.agent.profile_memory_tool.save_profile_facts",
-            return_value=MemoryListResponse.model_validate({"items": []}),
+            return_value=MemorySaveResult(
+                response=MemoryListResponse.model_validate({"items": []}),
+                saved_facts={"preference.language": "喜欢中文"},
+                current_facts={"preference.language": "喜欢中文"},
+            ),
         )
         self.save = save.start()
         self.addCleanup(save.stop)
 
     async def progress(self, stage):
         self.stages.append(stage)
+
+    async def test_receipt_replay_is_not_reported_as_a_new_save(self):
+        self.save.return_value = replace(self.save.return_value, replayed=True)
+        updated = await self.run_memory()
+        self.assertIn("earlier attempt", updated.policy.system_prompt)
+        self.assertIn("did not apply another write", updated.policy.system_prompt)
+        self.assertIn("memory_saved", self.stages)
 
     async def run_memory(self, progress=None):
         return await prepare_memory_for_turn(
@@ -230,8 +242,8 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         current = "那你可以把它存到我的 profile memory 吗"
         self.accepted = replace(
             self.accepted,
-            prepared_input=replace(
-                self.accepted.prepared_input,
+            admission_snapshot=replace(
+                self.accepted.admission_snapshot,
                 messages=(
                     InputMessage("user", previous),
                     InputMessage("assistant", "请明确告诉我是否保存"),
@@ -266,8 +278,8 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         previous = "我热爱学习"
         self.accepted = replace(
             self.accepted,
-            prepared_input=replace(
-                self.accepted.prepared_input,
+            admission_snapshot=replace(
+                self.accepted.admission_snapshot,
                 messages=(
                     InputMessage("user", previous),
                     InputMessage("assistant", "很好"),
@@ -290,8 +302,8 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_request_without_tool_asks_for_clarification(self):
         self.accepted = replace(
             self.accepted,
-            prepared_input=replace(
-                self.accepted.prepared_input,
+            admission_snapshot=replace(
+                self.accepted.admission_snapshot,
                 messages=(InputMessage("user", "请把它保存起来"),),
             ),
         )
@@ -303,8 +315,9 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
     async def test_sensitive_current_message_skips_memory_model_entirely(self):
         self.accepted = replace(
             self.accepted,
-            prepared_input=replace(
-                self.accepted.prepared_input, messages=(InputMessage("user", "我的密码是abc123"),)
+            admission_snapshot=replace(
+                self.accepted.admission_snapshot,
+                messages=(InputMessage("user", "我的密码是abc123"),),
             ),
         )
         await self.run_memory()
@@ -357,7 +370,7 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.save.assert_not_called()
 
     async def test_actual_prompt_and_tool_schema_budget_checked_before_model(self):
-        original = self.accepted.prepared_input
+        original = self.accepted.admission_snapshot
         small = replace(
             original.policy,
             app_context_tokens=2100,
@@ -366,7 +379,7 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
             tool_result_reserve_tokens=0,
             safety_tokens=0,
         )
-        self.accepted = replace(self.accepted, prepared_input=replace(original, policy=small))
+        self.accepted = replace(self.accepted, admission_snapshot=replace(original, policy=small))
         await self.run_memory()
         self.assertFalse(self.calls)
         self.save.assert_not_called()
@@ -397,7 +410,7 @@ class MemoryWorkflowTest(unittest.IsolatedAsyncioTestCase):
             started.set()
             release.wait(timeout=5)
             finished.set()
-            return MemoryListResponse.model_validate({"items": []})
+            return self.save.return_value
 
         self.save.side_effect = write
         task = asyncio.create_task(self.run_memory())

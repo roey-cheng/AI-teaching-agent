@@ -26,7 +26,7 @@
 
 - 模型先看到名称、简介和虚拟路径，需要时通过框架的 `read_file` 加载正文。
 - 支持直接讲解、分级提示和检查解题尝试；用户要求完整解释时可以切换，不强制一直反问。
-- `read_file` 仅允许 `/skills/adaptive-teaching/SKILL.md`。所有文件写入、宿主机路径和子 Agent 调用仍不开放。
+- `read_file` 允许教学技能、当前会话的 `/conversation_history/` 归档和 `/large_tool_results/`；路径与读取长度均受校验。模型不能任意写文件、访问宿主机路径或调用子 Agent。
 - 技能文件由 Python 包资源读取，随后端仓库部署，无需环境变量、数据库迁移或个人电脑路径。
 - 技能工具结果参与预算检查并进入本轮协议记录；若完整正文仍在选中的历史中，提示模型避免重复读取。
 - 每轮仍最多 4 次模型调用。首次读取技能通常多占一次模型往返；可执行“读技能 → 读记忆 → 保存记忆 → 最终回答”。
@@ -36,18 +36,21 @@
 
 ## 复用聊天图
 
-`build_chat_agent(settings, policy)` 只编译固定的模型、工具定义和中间件，不再接收
-`prepared_input` 或 `turn`。HTTP 的 `BackendRuntime.chat_agents` 和终端的
-`ChatAgentProvider` 按已校验归属的 `(user_id, session_id)` 缓存：同一会话的新消息与重试
+`compile_chat_graph(settings, policy, checkpointer=...)` 只编译固定的模型客户端、工具定义和中间件，不执行聊天，
+不接收用户画像或某次生成尝试。HTTP 的 `BackendRuntime.session_graph_cache` 和终端的
+`SessionChatGraphCache` 按已校验归属的 `(user_id, session_id)` 缓存：同一会话的新消息与重试
 复用同一张图，不同会话各自创建图，不是所有用户共用一张图。缓存随进程存活，重启后按需重建。
 模型配置或策略改变时需重启对应 runtime，不静默继续使用旧配置。
 
-每次执行仍新建 `TurnMemory` 和 `ChatRunContext`，通过
-`agent.astream({"messages": ...}, context=context)` 传入。记忆、工具写入权限、计数、
-协议记录属于这次调用；工具从 LangGraph runtime 取当前 turn，而非闭包捕获旧 turn。
-`checkpointer=None`：会话图跨轮复用不代表自动保留历史状态，历史仍从 MySQL 按用户和会话加载。
-只支持正式异步执行；离线无工具探针可显式 `with_memory_tools=False`。
-独立调用执行器时传入同一个 `agent_provider` 才能跨调用复用；省略时是一次性运行。
+每次生成尝试新建 `ChatAttemptState` 和 `ChatRunDependencies`，通过
+`chat_graph.astream({"messages": [新问题]}, context=run_dependencies, config=run_config)` 传入。
+前者管理本次尝试的工具权限、调用计数和协议消息；后者提供本次运行的准入快照、只读画像 Store 和尝试对象，
+不是模型上下文窗口。正式聊天必须注入 checkpointer，会话历史由 LangGraph 按已发布存档恢复，不再每轮重建。
+只支持正式异步执行；离线无工具测试可显式 `enable_chat_tools=False`，并注入测试 checkpointer。
+独立调用执行器也必须提供 `session_graph_cache`，没有隐式无存档降级路径。
+
+当前术语与旧名对照见 [命名说明](../docs/code-naming-guide.md)；存储、迁移及失败恢复边界见
+[会话状态整改说明](../docs/langgraph-state-refactor.md)。下方带日期的开发阶段记录保留历史语境，不代表当前架构。
 
 ## Python 环境
 
@@ -810,34 +813,34 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 这一阶段没有 HTTP、SSE、真实模型调用、限流、失败重试或后台任务。输入组装与准入预算现已补上，详见下一节。测试中的成功回复直接写入临时库，不表示正式 ASSISTANT 保存业务已实现。不修改项目数据库或表结构，不提交/推送 Git。
 
-## 发送第二步：组装 Agent 输入
+## 发送第二步：检查聊天准入快照
 
-2026-09-26 新增，简单说就是：**把 AI 回答前需要看的材料备齐，再判断放不放得下。这里还没有让 AI 开始回答。**
+简单说就是：**先检查本条问题和画像是否能放进预算；这里还没有让 AI 回答，也没有恢复完整会话历史。**
 
 | 位置 | 职责 |
 |---|---|
 | `app/agent/input_policy.py` | 后端模型容量、应用预算、输出/工具等预留，以及明确标为估算的计数函数 |
-| `app/services/agent_input.py` | 验证会话归属，读取当前用户记忆、挑选本会话成功问答，形成不可变输入快照 |
-| `app/services/message_submission.py` | 保存新问题前调用上述组装；提交成功后把同一份快照交给未来执行器 |
+| `app/services/agent_input.py` | 验证会话归属，读取当前用户画像，检查本条问题并形成不可变准入快照 |
+| `app/services/message_submission.py` | 保存新问题前执行准入检查；提交成功后把同一份快照交给执行器 |
 
-### 输入是怎样整理的
+### 准入与完整会话输入的区别
 
 1. 在消息准入的同一事务内确认会话属于当前用户。不接受前端指定别人的用户编号。
 2. 从 `agent_memory` 按当前用户读取，整理成 `/memories/profile.md` 对应的文本快照；不创建磁盘文件，不保存第二份 Profile。正文是用户数据，不是系统指令，不能授权访问别人的数据。
-3. 先计算系统提示、工具定义、完整当前问题和记忆的估算占用。必要内容已超预算则抛 `ContextTooLargeError`（未来 HTTP 层映射 `422 CONTEXT_TOO_LARGE`）；不保存 USER、不占用 key、不改标题或活动时间。
-4. 从本会话最近的成功 USER 问题查找对应 ASSISTANT，逐轮加入预算。失败问题不入选；成功状态却缺少正确关联回答时报安全错误，不偷偷当作正常历史。
-5. 下一整轮放不下就停止，不拆开问答、不跳过较近的大轮次。查询每批最多 50 轮，但可以继续读下一批，**50 不是总轮数限制，更没有 20 轮上限**。
-6. 把选中的问答按旧到新排列，末尾完整加入当前问题一次。快照保留来源消息编号、选中轮数、是否因预算停止和估算方式，方便测试。未选中历史仍保留在数据库和页面。
+3. 计算系统提示、已知工具定义、完整当前问题和画像的估算占用。必要内容已超准入预算则抛 `ContextTooLargeError`（HTTP 层映射 `422 CONTEXT_TOO_LARGE`）；不保存 USER、不占用 key、不改标题或活动时间。
+4. 准入快照的消息列表只包含当前问题。重试时保留原问题编号和原文，不在准入阶段查询或重建历史。
+5. 执行器从本会话已发布的 checkpoint 恢复历史，加入当前问题；旧数据只在首次建立 checkpoint 时从 SQL 成功问答导入。失败尝试的未发布状态不会自动成为下次聊天的起点。
+6. Deep Agents 的原生摘要中间件管理执行时的会话压缩，预算中间件再次检查真正发送给模型的请求。准入快照的局部估算不能替代这一步。
 
-`PreparedAgentInput.as_agent_messages()` 只转换为 LangChain 的 HumanMessage/AIMessage 列表，每次产生新对象；不会调用模型。系统提示在 `policy.system_prompt`，记忆在 `profile_memory`，不重复塞进聊天列表。新 USER 保存后不重新组装另一份上下文，因此不会再次把当前问题追加进去。重复请求只返回原回执，不重新读记忆或计算新预算。
+`ChatAdmissionSnapshot.to_langchain_messages()` 只把快照里的本地消息转换为 LangChain 的 HumanMessage/AIMessage 列表，每次产生新对象；不会调用模型或恢复 checkpoint。正式聊天快照只包含本条问题及画像，完整会话历史由 LangGraph checkpoint 管理。`estimated_local_input_tokens`、`included_history_turns`、`input_history_trimmed` 只描述本地快照，不代表恢复后的完整模型输入。系统提示在 `policy.system_prompt`，画像在 `profile_memory`，不重复塞进消息列表。
 
 ### 当前预算及明确限制
 
 本地配置型号是 `deepseek-v4-pro`。[DeepSeek 官方模型元数据文档](https://api-docs.deepseek.com/api/list-models/)于 2026-09-26 核对：上下文 1,048,576，最大输出 393,216 tokens。代码仅登记这个已核对型号，换型号必须新增经过确认的配置，不猜测容量；这些是静态配置，不会自动随供应商变化。
 
-为了控制第一版成本，应用层默认总预算为 65,536，小于供应商上限；其中预留输出 4,096、Deep Agents 框架提示/包装 8,192、后续工具结果 4,096、安全余量 4,096，剩下 45,056 用于当前问题、记忆、已知系统提示/工具和成功历史。可通过后端 `AgentInputPolicy` 显式调整，不能由前端任意指定；不会修改你的 `.env` 或模型配置。
+为了控制成本，应用层默认总预算为 65,536，小于供应商上限；准入阶段预留输出 4,096、Deep Agents 框架提示/包装 8,192、后续工具结果 4,096、安全余量 4,096，剩下 45,056 用于检查当前问题、画像和已知系统提示/工具。执行阶段另行检查包含会话历史的完整请求。可通过后端 `AgentInputPolicy` 显式调整，不能由前端任意指定；不会修改你的 `.env` 或模型配置。
 
-计数采用 **UTF-8 字节数 + 消息/外层开销的保守估算**，不是字符数，也不是 DeepSeek tokenizer 的精确结果或计费数字。中文、英文和 emoji 占用不同。它可能比实际 token 数大，从而更早舍弃旧历史；不是对供应商最终编码的数学保证。
+准入计数采用 **UTF-8 字节数 + 消息/外层开销的保守估算**，不是字符数，也不是 DeepSeek tokenizer 的精确结果或计费数字。中文、英文和 emoji 占用不同。它可能比实际 token 数大，使准入更早拒绝过大的问题；不是对供应商最终编码的数学保证，也不会在准入阶段裁剪 checkpoint 历史。
 
 本节输入组装完成时尚未创建正式 Deep Agent。2026-10-09 已补上下节的 Agent 工厂、只读记忆后端和最终请求预算保护；当前正式工具清单仍为空，未来启用工具时需要同步调整实际工具定义及预算计算。框架预留不是已经测量过的默认工具开销。**保守估算不等于供应商精确 tokenizer，也不能保证供应商最终编码永远不超窗。** 不向用户开放默认文件工具/子 Agent，不启用自动历史摘要。
 
@@ -851,7 +854,7 @@ INSERT/提交异常时，不自动重发：在新事务重新锁父会话、查�
 
 ## 创建正式聊天 Agent
 
-以下保留 2026-10-09 的历史实现说明；其中自写 Backend 和 `store=None` 已被上方的原生 StoreBackend 方案替代。当时新增文件按实际编写顺序：
+以下各小节保留 2026-10-09 的历史实现说明，**不是当前调用方式**。其中旧类名、自写 Backend、`store=None`、`checkpointer=None` 和每次生成新建图均已被上方的会话缓存、原生 StoreBackend 和持久化 checkpointer 方案替代。当时新增文件按实际编写顺序：
 
 1. `app/agent/memory_backend.py`：先实现 `ProfileMemoryBackend`，继承 Deep Agents 的 `BackendProtocol`。把准备好的记忆文本作为只读虚拟 `/memories/profile.md` 提供给框架；没有实际磁盘文件、数据库连接或命令执行能力。其他文件路径拒绝读取，write/edit/delete/upload 全部拒绝；异步接口复用同样限制。每个实例只持有本次用户的不可变快照。
 2. `app/agent/budget_middleware.py`：再实现 `ChatMemoryBudgetMiddleware`，继承框架的 `MemoryMiddleware`。使用同名替换机制，让框架先加载快照、加入 system message，再检查最终请求。每次运行都重新从绑定快照加载，不接受调用参数夹带的 `memory_contents` 覆盖用户记忆。另用无操作的 `NoAutomaticSummary` 同名替换主 Agent 的自动摘要中间件，不调用额外摘要模型。

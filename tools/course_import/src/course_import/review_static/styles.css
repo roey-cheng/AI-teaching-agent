@@ -1,0 +1,95 @@
+:root {
+  color-scheme: light;
+  --ink: #172033;
+  --muted: #657084;
+  --line: #d9dfe9;
+  --paper: #ffffff;
+  --canvas: #f3f5f8;
+  --accent: #3457d5;
+  --accent-soft: #e9edff;
+  --danger: #a23d45;
+  --warning: #9b5d00;
+  font: 15px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--ink); background: var(--canvas); }
+button, textarea, input { font: inherit; }
+button { border: 1px solid var(--line); background: var(--paper); color: var(--ink); padding: 8px 11px; cursor: pointer; border-radius: 7px; }
+button:hover { border-color: var(--accent); }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid #afbcff; outline-offset: 1px; }
+
+.topbar { min-height: 92px; display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 18px 26px; color: white; background: #172033; }
+.topbar h1 { margin: 0 0 4px; font-size: 21px; }
+.topbar p { margin: 0; color: #c7cede; }
+.progress { max-width: 420px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; min-height: 54px; padding: 10px 26px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.filters label, .section-head label { white-space: nowrap; }
+
+.workspace { display: grid; grid-template-columns: minmax(245px, 310px) minmax(440px, 1fr) minmax(320px, 390px); height: calc(100vh - 147px); }
+.queue, .viewer, .inspection { min-width: 0; overflow: auto; background: var(--paper); }
+.queue { border-right: 1px solid var(--line); }
+.inspection { border-left: 1px solid var(--line); padding: 18px; }
+.viewer { padding: 18px; background: #e9edf3; }
+.queue-head, .viewer-head, .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.queue-head { position: sticky; top: 0; z-index: 2; padding: 14px 16px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.queue-doc { padding: 10px 16px 4px; color: var(--muted); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+.queue-item { width: 100%; border: 0; border-radius: 0; padding: 11px 16px; text-align: left; border-bottom: 1px solid #edf0f4; }
+.queue-item:hover, .queue-item.active { background: var(--accent-soft); }
+.queue-item strong { display: block; }
+.queue-item small { color: var(--muted); }
+.status-mark { float: right; color: #237149; }
+
+.viewer-head { margin-bottom: 14px; }
+.viewer-head h2, .inspection h2 { margin: 0; font-size: 16px; }
+.viewer-head p { margin: 5px 0 0; color: var(--muted); }
+.pager { display: flex; gap: 7px; }
+.preview { min-height: 520px; display: flex; align-items: center; justify-content: center; overflow: auto; background: #cfd5df; border: 1px solid #c0c8d5; }
+.preview img.pdf-page { display: block; max-width: 100%; height: auto; box-shadow: 0 4px 18px #57607155; }
+.preview-note { color: var(--muted); }
+.empty-state { color: var(--muted); }
+
+.slide-structure { position: relative; width: min(100%, 960px); aspect-ratio: 16 / 9; overflow: hidden; background: white; box-shadow: 0 4px 18px #57607155; }
+.slide-element { position: absolute; overflow: hidden; border: 1px solid #8793a844; color: #202638; white-space: pre-wrap; font-size: clamp(8px, 1.1vw, 15px); padding: 3px; }
+.slide-element.kind-title { font-weight: 700; border-color: #3457d577; }
+.slide-element.kind-code { font: clamp(7px, .95vw, 13px)/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; background: #f1f3f7; }
+.slide-element.kind-image { padding: 0; border-color: #c87613; }
+.slide-element.kind-image img { width: 100%; height: 100%; object-fit: contain; }
+.slide-element.kind-group, .slide-element.kind-drawing { background: transparent; border-style: dashed; pointer-events: none; }
+.slide-element.suspicious { outline: 2px solid #db7a23; outline-offset: -2px; }
+
+.inspection section { padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+.decision-panel textarea { width: 100%; min-height: 68px; margin: 10px 0; padding: 9px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.actions button[data-action="use"] { color: #16613c; }
+.actions button[data-action="exclude"] { color: var(--danger); }
+.actions button[data-action="ocr"], .actions button[data-action="vision"], .actions button[data-action="full_page"] { color: var(--warning); }
+.secondary { margin-top: 8px; color: var(--muted); }
+.reason-list { padding-left: 20px; color: var(--muted); overflow-wrap: anywhere; }
+.element-card { margin: 10px 0; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; }
+.element-card header { display: flex; justify-content: space-between; gap: 10px; }
+.element-card pre { max-height: 210px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: #eef1f5; padding: 8px; }
+.element-card img { max-width: 100%; max-height: 220px; display: block; margin: 8px auto; }
+.element-card .actions { grid-template-columns: repeat(3, 1fr); }
+.element-card button { padding: 5px; font-size: 12px; }
+.decision-badge { margin: 8px 0; padding: 6px 8px; background: #e5f4ea; color: #175a37; }
+.category { display: inline-block; margin: 4px 4px 0 0; padding: 2px 6px; border: 1px solid #c7cfdb; border-radius: 5px; color: var(--muted); font-size: 11px; }
+
+#toast { position: fixed; right: 20px; bottom: 20px; max-width: 380px; padding: 11px 15px; border-radius: 8px; color: white; background: #172033; opacity: 0; pointer-events: none; transition: opacity .15s; }
+#toast.show { opacity: 1; }
+
+@media (max-width: 1100px) {
+  .workspace { grid-template-columns: 260px 1fr; }
+  .inspection { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
+  .workspace { height: auto; }
+  .queue, .viewer { height: calc(100vh - 147px); }
+}
+
+@media (max-width: 700px) {
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .progress { text-align: left; }
+  .workspace { display: block; }
+  .queue { height: 320px; }
+  .viewer { height: auto; }
+}

@@ -66,14 +66,20 @@ class ProfileStore(BaseStore):
         self._snapshot: InMemoryStore | None = None
 
     @classmethod
-    def snapshot(
+    def read_only_snapshot(
         cls,
         user_id: int,
         profile_text: str,
         *,
         facts: Mapping[str, str] | None = None,
         skill_text: str | None = None,
+        strip_memory_mount_prefix: bool = False,
     ):
+        """构建仅供本次运行读取的内存副本；不是数据库连接，也不提交写入。
+
+        strip_memory_mount_prefix 仅适配 CompositeBackend 的挂载路径转换。
+        数据库模式仍使用 ProfileStore(user_id, session, ...) 构造。
+        """
         # No DB handles are shared with graph threads. This view is disposable;
         # persistence remains in agent_memory, accessed by session-bound instances.
         instance = cls(user_id)
@@ -83,6 +89,10 @@ class ProfileStore(BaseStore):
         if skill_text is not None:
             files[TEACHING_SKILL_PATH] = skill_text
         for path, content in files.items():
+            if strip_memory_mount_prefix and path.startswith("/memories/"):
+                # CompositeBackend strips its mount prefix before StoreBackend reads.
+                # Durable business-store keys remain unchanged.
+                path = path.removeprefix("/memories")
             view.put(instance.namespace, path, {"content": content, "encoding": "utf-8"})
         instance._snapshot = view
         return instance

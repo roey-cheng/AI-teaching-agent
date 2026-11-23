@@ -9,6 +9,7 @@ from sqlalchemy import Engine, inspect
 
 from app import models  # noqa: F401 -- 导入五张表，将它们登记到 Base.metadata。
 from app.db.base import Base
+from app.db.checkpoints import CheckpointStorageNotReadyError, check_checkpoint_schema
 
 
 class DatabaseNotReadyError(Exception):
@@ -31,3 +32,7 @@ def check_database_ready(engine: Engine) -> None:
         tables = set(inspect(connection).get_table_names())
         if actual != heads or not set(Base.metadata.tables).issubset(tables):
             raise DatabaseNotReadyError()
+    try:
+        check_checkpoint_schema(engine)
+    except CheckpointStorageNotReadyError:
+        raise DatabaseNotReadyError() from None

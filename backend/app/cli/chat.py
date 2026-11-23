@@ -3,10 +3,13 @@
 import argparse
 import asyncio
 import sys
+from contextlib import ExitStack
 from uuid import uuid4
 
 from pydantic import ValidationError
+from sqlalchemy import Engine
 
+from app.agent.factory import SessionChatGraphCache
 from app.agent.input_policy import policy_for_model
 from app.cli.terminal import EventPrinter, Terminal, print_history
 from app.core.config import (
@@ -19,6 +22,7 @@ from app.core.config import (
 )
 from app.core.runtime import open_backend_runtime
 from app.core.runtime_lock import RuntimeAlreadyActiveError
+from app.db.checkpoints import open_checkpoint_saver
 from app.db.engine import build_database_engine
 from app.db.readiness import DatabaseNotReadyError, check_database_ready
 from app.schemas import DuplicateMessageResponse, LoginRequest, RegisterRequest, SendMessageRequest
@@ -104,6 +108,7 @@ def run_chat(
     *,
     registry: GenerationRegistry | None = None,
     limiter: GenerationRateLimiter | None = None,
+    session_graph_cache: SessionChatGraphCache | None = None,
 ) -> int:
     """同步终端循环 + 持续复用的 Runner。等待键盘时没有 Agent 在后台运行。
 
@@ -111,9 +116,6 @@ def run_chat(
     模型运行期间由 Runner 取消主协程，execute_chat_turn 完成自己的安全收尾。
     """
     token = None
-    from app.agent.factory import ChatAgentProvider
-
-    agent_provider = ChatAgentProvider()
     code = 0
     try:
         policy = policy_for_model(model_settings.name)
@@ -130,7 +132,17 @@ def run_chat(
         printer = EventPrinter(terminal)
         # 提交结果不明后暂停发送；保留原 key，不自动以新 key 重发。
         uncertain_request: SendMessageRequest | None = None
-        with asyncio.Runner() as runner:
+        # ExitStack closes the async pool on this Runner's loop before Runner
+        # closes that loop. Tests explicitly supply an InMemorySaver provider.
+        with asyncio.Runner() as runner, ExitStack() as resources:
+            if session_graph_cache is None:
+                engine = factory.kw.get("bind")
+                if not isinstance(engine, Engine):
+                    raise RuntimeError("The CLI requires a database-bound session factory")
+                checkpoint_scope = open_checkpoint_saver(engine)
+                saver = runner.run(checkpoint_scope.__aenter__())
+                resources.callback(lambda: runner.run(checkpoint_scope.__aexit__(None, None, None)))
+                session_graph_cache = SessionChatGraphCache(saver)
             while True:
                 line = terminal.read("\nYou> ")
                 command = line.strip()
@@ -204,7 +216,7 @@ def run_chat(
                                 user_id
                             ),
                             on_event=printer,
-                            agent_provider=agent_provider,
+                            session_graph_cache=session_graph_cache,
                         )
                     )
                     if isinstance(result, DuplicateMessageResponse):
@@ -296,6 +308,7 @@ def launch(
                 tracing,
                 registry=runtime.registry,
                 limiter=runtime.limiter,
+                session_graph_cache=runtime.session_graph_cache,
             )
     except RuntimeAlreadyActiveError:
         terminal.write(

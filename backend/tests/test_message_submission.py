@@ -46,7 +46,7 @@ class MessageSubmissionTest(unittest.TestCase):
         self.registry = GenerationRegistry()
         self.check = MagicMock()
         self.policy = policy_for_model("deepseek-v4-pro")
-        preparer = patch("app.services.message_submission.prepare_agent_input")
+        preparer = patch("app.services.message_submission.prepare_chat_admission")
         self.prepare = preparer.start()
         self.addCleanup(preparer.stop)
 
@@ -66,7 +66,7 @@ class MessageSubmissionTest(unittest.TestCase):
             with self.accept() as result:
                 assert isinstance(result, AcceptedMessage)
                 self.assertEqual(result.user_message_id, "20")
-                self.assertIs(result.prepared_input, self.prepare.return_value)
+                self.assertIs(result.admission_snapshot, self.prepare.return_value)
                 self.factory.begin.return_value.__exit__.assert_called_once_with(None, None, None)
                 settle.assert_not_called()
                 saved = self.writer.add.call_args.args[0]

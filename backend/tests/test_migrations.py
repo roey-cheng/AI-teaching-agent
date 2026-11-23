@@ -24,7 +24,7 @@ from testing_support import require_value
 BACKEND = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "20260925_0001"
 RUNTIME_REVISION = "20261012_0003"
-HEAD_REVISION = "20261025_0004"
+HEAD_REVISION = "20261025_0005"
 
 
 def make_config(output=None):
@@ -54,17 +54,20 @@ class MigrationTest(unittest.TestCase):
         self.revision = self.script.get_revision(INITIAL_REVISION).module
         self.runtime_revision = self.script.get_revision(RUNTIME_REVISION).module
         self.head_revision = self.script.get_revision(HEAD_REVISION).module
+        self.topic_revision = self.script.get_revision("20261025_0004").module
         self.quota_revision = self.script.get_revision("20261012_0002").module
 
     def test_linear_revision_chain_and_no_live_model_imports(self):
         self.assertEqual(self.script.get_heads(), [HEAD_REVISION])
         self.assertIsNone(self.revision.down_revision)
-        self.assertEqual(self.head_revision.down_revision, RUNTIME_REVISION)
+        self.assertEqual(self.head_revision.down_revision, "20261025_0004")
+        self.assertEqual(self.topic_revision.down_revision, RUNTIME_REVISION)
         self.assertEqual(self.quota_revision.down_revision, INITIAL_REVISION)
         for revision in (
             self.revision,
             self.quota_revision,
             self.runtime_revision,
+            self.topic_revision,
             self.head_revision,
         ):
             source = Path(require_value(revision.__file__)).read_text()
@@ -94,6 +97,7 @@ class MigrationTest(unittest.TestCase):
             self.revision,
             self.quota_revision,
             self.runtime_revision,
+            self.topic_revision,
             self.head_revision,
         ):
             offline = (
@@ -110,7 +114,7 @@ class MigrationTest(unittest.TestCase):
                 revision.upgrade()
 
         self.assertEqual(set(metadata.tables), set(Base.metadata.tables))
-        self.assertEqual(len(created), 11)
+        self.assertEqual(len(created), 13)
         for name, table in metadata.tables.items():
             model = Base.metadata.tables[name]
             with self.subTest(table=name):
@@ -162,7 +166,7 @@ class MigrationTest(unittest.TestCase):
         sql = output.getvalue()
         for name in Base.metadata.tables:
             self.assertEqual(sql.count(f"CREATE TABLE {name} ("), 1)
-        self.assertEqual(sql.count("CREATE TABLE "), 12)
+        self.assertEqual(sql.count("CREATE TABLE "), 14)
         for expected in (
             "CREATE TABLE alembic_version",
             "INSERT INTO alembic_version",
@@ -178,14 +182,14 @@ class MigrationTest(unittest.TestCase):
         ):
             self.assertIn(expected, sql)
         self.assertNotIn("DROP TABLE", sql)
-        topic_source = Path(require_value(self.head_revision.__file__)).read_text()
+        topic_source = Path(require_value(self.topic_revision.__file__)).read_text()
         self.assertIn("personal.interests", topic_source)
         self.assertIn("20261025_0004", sql)
 
     def test_downgrade_sql_drops_children_before_parents(self):
         output = StringIO()
         with patch("pymysql.connect") as connect:
-            command.downgrade(make_config(output), f"{HEAD_REVISION}:base", sql=True)
+            command.downgrade(make_config(output), "20261025_0004:base", sql=True)
         connect.assert_not_called()
         sql = output.getvalue()
         expected_order = [
@@ -204,6 +208,10 @@ class MigrationTest(unittest.TestCase):
         positions = [sql.index(f"DROP TABLE {name};") for name in expected_order]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("DELETE FROM alembic_version", sql)
+
+    def test_checkpoint_downgrade_requires_explicit_data_preservation_plan(self):
+        with self.assertRaisesRegex(RuntimeError, "backup/rollback"):
+            self.head_revision.downgrade()
 
     def test_initial_upgrade_refuses_existing_tables_or_views_before_ddl(self):
         for kind in ("get_table_names", "get_view_names"):

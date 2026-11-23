@@ -15,7 +15,7 @@ from app.agent.input_policy import AgentInputPolicy
 from app.models import ChatSession, Message
 from app.schemas import DuplicateMessageResponse, SendMessageRequest, UserResponse
 from app.schemas._validation import format_database_id
-from app.services.agent_input import PreparedAgentInput, prepare_agent_input
+from app.services.agent_input import ChatAdmissionSnapshot, prepare_chat_admission
 from app.services.errors import (
     IdempotencyConflictError,
     MessageSendUnavailableError,
@@ -33,7 +33,7 @@ class AcceptedMessage:
     session_id: str
     user_message_id: str
     attempt_id: str
-    prepared_input: PreparedAgentInput = field(repr=False)
+    admission_snapshot: ChatAdmissionSnapshot = field(repr=False)
 
 
 def _owned_chat(session: Session, chat_id: int, user_id: int) -> ChatSession:
@@ -193,7 +193,7 @@ def accept_user_message(
                 )
                 if orphan is not None:
                     raise MessageSendUnavailableError()
-                prepared_input = prepare_agent_input(
+                admission_snapshot = prepare_chat_admission(
                     session, current_user, str(chat_id), request, input_policy
                 )
                 check_new_message(
@@ -245,7 +245,7 @@ def accept_user_message(
                         now=now,
                     )
                 result = AcceptedMessage(
-                    str(chat_id), str(question.message_id), owned_attempt, prepared_input
+                    str(chat_id), str(question.message_id), owned_attempt, admission_snapshot
                 )
     except BaseException as error:
         # 不论是 flush 失败还是提交结果不明，先独立核对，不能直接释放本地占用。

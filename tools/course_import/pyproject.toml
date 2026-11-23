@@ -1,0 +1,30 @@
+[project]
+name = "course-import"
+version = "0.1.0"
+description = "Local, review-first course material inventory and extraction"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "defusedxml>=0.7.1,<1",
+    "docling==2.142.1",
+    "python-pptx>=1.0.2,<2",
+    "pypdf>=6,<7",
+    "pypdfium2>=4.30,<6",
+    "pillow>=11,<13",
+]
+
+[project.scripts]
+course-import = "course_import.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.13,<1"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

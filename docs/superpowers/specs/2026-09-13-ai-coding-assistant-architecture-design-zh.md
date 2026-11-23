@@ -83,7 +83,8 @@ flowchart TD
 ```
 
 开发初期使用同一个 FastAPI 项目和同一个 MySQL 数据库。Website Core 与 Agent Module 是同一个后端里的逻辑模块，不是两个通过 HTTP 互相调用的服务。模块边界通过代码目录、service layer、repository、internal tools 和数据库访问权限来维持。
-教师端不是一个独立产品。教师和学生进入同一个校内 Coding Lab 网站；教师在相同的 Course / Lab / Question / Run 页面基础上，因为角色权限不同，会额外看到教师专用入口和 Dashboard。
+图中的 Grading Sandbox 与 Diagnostic Sandbox 表示两条独立的业务调用路径；开发初期共用一套底层代码执行沙箱，但诊断运行不参与正式评分。
+教师端不是一个独立产品。参照 CodeRunner 在同一课程中由教师配置编程题与测试、学生编写代码并查看运行反馈的使用方式，教师和学生都进入校内 Coding Lab 网站；教师可访问相同的 Course / Lab / Question / Run 页面，并额外使用题目与测试管理入口以及教师 Dashboard。
 
 ---
 

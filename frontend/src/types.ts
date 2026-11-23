@@ -107,8 +107,10 @@ export type LiveGeneration = {
   userContent: string
   attemptId: string | null
   stage: AgentStage | null
+  // Frontend-only state after the server confirms persistence; not an SSE stage.
+  completionStatus: 'saved' | 'syncing_history' | null
   reasoning: string
   answer: string
-  toolSteps?: string[]
+  intermediateAssistantMessages?: string[]
   error: GenerationError | null
 }

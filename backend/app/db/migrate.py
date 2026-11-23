@@ -6,6 +6,7 @@ from alembic.config import Config
 
 from alembic import command
 from app.core.config import load_database_settings
+from app.db.checkpoints import setup_checkpoint_schema
 from app.db.engine import build_database_engine
 from app.db.runtime_guard import (
     DatabaseRuntimeAlreadyActiveError,
@@ -21,12 +22,15 @@ def main() -> None:
         try:
             with DatabaseRuntimeLock(engine):
                 command.upgrade(Config(str(backend / "alembic.ini")), "head")
+                setup_checkpoint_schema(engine)
         except DatabaseRuntimeAlreadyActiveError:
             raise SystemExit(
                 "Migration refused: stop the backend using this database, then retry."
             ) from None
         except DatabaseRuntimeLockError:
-            raise SystemExit("Migration refused: the database runtime lock is unavailable.") from None
+            raise SystemExit(
+                "Migration refused: the database runtime lock is unavailable."
+            ) from None
     finally:
         engine.dispose()
 

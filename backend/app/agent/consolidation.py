@@ -13,7 +13,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_deepseek import ChatDeepSeek
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.budget_middleware import NoAutomaticSummary, check_request_budget
+from app.agent.budget_middleware import DisableSummarizationMiddleware, check_request_budget
 from app.agent.input_policy import policy_for_model
 from app.agent.memory_backend import snapshot_backend
 from app.agent.profile_memory_tool import MemoryCandidate, contains_sensitive_memory
@@ -108,7 +108,7 @@ async def extract_candidates(claimed, settings):
         extra_body={"thinking": {"type": "disabled"}},
     )
     middleware: list[AgentMiddleware[Any, None]] = [
-        NoAutomaticSummary(),
+        DisableSummarizationMiddleware(),
         ModelCallLimitMiddleware(run_limit=1, exit_behavior="error"),
         ExtractionOnly(),
     ]

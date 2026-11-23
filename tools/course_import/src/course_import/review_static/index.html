@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>课件审核工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>课件审核工作台</h1>
+      <p>只处理异常与候选页。所有决定保存在本地，不会调用模型或发布到 RAG。</p>
+    </div>
+    <div class="progress" id="progress">正在载入…</div>
+  </header>
+
+  <section class="filters" aria-label="审核筛选器">
+    <label><input type="checkbox" id="without-page-decision" checked> 只看未作整页决定</label>
+    <label><input type="checkbox" id="high" checked> 只看高优先级</label>
+    <label><input type="checkbox" name="category" value="scan" checked> 扫描候选</label>
+    <label><input type="checkbox" name="category" value="empty" checked> 空结果/空表格</label>
+    <label><input type="checkbox" name="category" value="visibility" checked> 可见性问题</label>
+    <label><input type="checkbox" name="category" value="layout" checked> 组合布局</label>
+    <label><input type="checkbox" name="category" value="vision" checked> 图片理解</label>
+    <label><input type="checkbox" name="category" value="excluded"> 隐藏页/备注</label>
+    <label><input type="checkbox" name="category" value="decoration"> 重复小图</label>
+    <label><input type="checkbox" name="category" value="no_rule_flags"> 未触发检查规则</label>
+  </section>
+
+  <main class="workspace">
+    <nav class="queue" aria-label="待审核页面">
+      <div class="queue-head">
+        <strong>审核队列</strong>
+        <span id="queue-count"></span>
+      </div>
+      <div id="queue-list"></div>
+    </nav>
+
+    <section class="viewer" aria-label="页面预览">
+      <div class="viewer-head">
+        <div>
+          <h2 id="page-title">选择一个页面</h2>
+          <p id="page-meta"></p>
+        </div>
+        <div class="pager">
+          <button id="previous" type="button">上一项</button>
+          <button id="next" type="button">下一项</button>
+        </div>
+      </div>
+      <div id="preview" class="preview empty-state">从左侧选择待审核页面</div>
+      <p id="preview-note" class="preview-note"></p>
+    </section>
+
+    <aside class="inspection" aria-label="提取结果和审核决定">
+      <section class="decision-panel">
+        <h2>本页决定</h2>
+        <textarea id="decision-note" maxlength="500" placeholder="可选备注，例如：第 3 行文字被图片挡住"></textarea>
+        <div id="page-actions" class="actions"></div>
+        <button id="reset-page" class="secondary" type="button">撤销本页决定</button>
+      </section>
+      <section>
+        <h2>为何进入队列</h2>
+        <ul id="routing-reasons" class="reason-list"></ul>
+      </section>
+      <section>
+        <div class="section-head">
+          <h2>提取元素</h2>
+          <label><input type="checkbox" id="issues-only" checked> 只看存疑元素</label>
+        </div>
+        <div id="elements"></div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

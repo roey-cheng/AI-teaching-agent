@@ -44,6 +44,8 @@ def settle_generation(
     error_code: str | None = None,
     quota: GenerationQuota | None = None,
     protocol_messages: list | None = None,
+    checkpoint_id: str | None = None,
+    checkpoint_parent_id: str | None = None,
 ) -> GenerationOutcome:
     """answer 与 error_code 二选一。已成功的提交可核对返回，最终状态不会被覆盖。
 
@@ -57,14 +59,14 @@ def settle_generation(
     if error_code is not None and error_code not in PUBLIC_GENERATION_ERRORS:
         raise ValueError("Unknown public generation error")
     chat_id = int(accepted.session_id)
-    if accepted.prepared_input.session_id != accepted.session_id:
+    if accepted.admission_snapshot.session_id != accepted.session_id:
         raise StaleGenerationError()
     try:
         with registry.locked(chat_id) as slot:
             if slot.attempt_id != accepted.attempt_id:
                 raise StaleGenerationError()
             with session_factory.begin() as session:
-                chat = _owned_chat(session, chat_id, int(accepted.prepared_input.user_id))
+                chat = _owned_chat(session, chat_id, int(accepted.admission_snapshot.user_id))
                 question = session.scalar(
                     select(Message)
                     .where(
@@ -115,12 +117,25 @@ def settle_generation(
                 now = datetime.now(UTC).replace(tzinfo=None)
                 question.updated_at = now
                 if answer is not None:
+                    if checkpoint_id is not None:
+                        from app.models.chat_thread import PublishedChatCheckpoint
+
+                        head = session.get(PublishedChatCheckpoint, chat_id)
+                        if (
+                            head is None
+                            or head.user_id != int(accepted.admission_snapshot.user_id)
+                            or head.checkpoint_id != checkpoint_parent_id
+                        ):
+                            raise StaleGenerationError()
+                        # Same transaction as answer/status: unpublished failed
+                        # branches can never become the next turn's context.
+                        head.checkpoint_id = checkpoint_id
                     saved = Message(
                         chat_session_id=chat_id,
                         role="ASSISTANT",
                         content=answer,
                         in_reply_to_message_id=question.message_id,
-                        model_key=accepted.prepared_input.policy.model_name,
+                        model_key=accepted.admission_snapshot.policy.model_name,
                         created_at=now,
                         updated_at=now,
                     )
@@ -130,19 +145,19 @@ def settle_generation(
 
                         from app.agent.orchestrator import validate_protocol
                         from app.models import AgentTurnRecord
-                        from app.services.memory_tasks import touch_memory
+                        from app.services.memory_tasks import record_consolidation_activity
 
                         validate_protocol(messages_from_dict(protocol_messages))
                         session.add(
                             AgentTurnRecord(
                                 question_id=question.message_id,
-                                user_id=int(accepted.prepared_input.user_id),
+                                user_id=int(accepted.admission_snapshot.user_id),
                                 messages=protocol_messages,
                             )
                         )
-                        touch_memory(
+                        record_consolidation_activity(
                             session,
-                            int(accepted.prepared_input.user_id),
+                            int(accepted.admission_snapshot.user_id),
                             now,
                             dirty=True,
                             message_id=question.message_id,

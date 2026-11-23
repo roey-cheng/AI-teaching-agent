@@ -1,5 +1,6 @@
 """只在验收脚本创建的临时 MySQL 上检查输入快照和准入回滚；不调用模型。"""
 
+import json
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -14,10 +15,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.agent.input_policy import AgentInputPolicy
 from app.models import AgentMemory, Message
 from app.schemas import DuplicateMessageResponse, SendMessageRequest, SessionResponse, UserResponse
-from app.services.agent_input import prepare_agent_input
+from app.services.agent_input import prepare_chat_admission
+from app.services.chat_checkpoints import _load_head_or_legacy
 from app.services.chat_sessions import create_chat_session
 from app.services.errors import (
-    AgentInputUnavailableError,
     ContextTooLargeError,
     SessionNotFoundError,
 )
@@ -43,7 +44,7 @@ class AgentInputMySQLTest(unittest.TestCase):
 
     def prepare(self, user=None, chat_id=None):
         with self.factory() as session:
-            return prepare_agent_input(
+            return prepare_chat_admission(
                 session,
                 user or self.user,
                 chat_id or self.chat.session_id,
@@ -96,14 +97,25 @@ class AgentInputMySQLTest(unittest.TestCase):
                 )
             )
 
-    def test_sixty_rounds_sorted_and_failed_questions_excluded(self):
-        ids = [self.pair(f"question-{i}") for i in range(60)]
+    def test_admission_does_not_rebuild_sixty_rounds_but_native_bootstrap_keeps_order(self):
+        for i in range(60):
+            self.pair(f"question-{i}")
         self.pair("failed question secret", failed=True)
         result = self.prepare()
-        self.assertEqual(result.history_rounds, 60)
-        self.assertEqual([m.source_message_id for m in result.messages[:-1:2]], ids)
+        self.assertEqual(result.included_history_turns, 0)
+        self.assertEqual(len(result.messages), 1)
         self.assertNotIn("failed question secret", [m.content for m in result.messages])
         self.assertEqual(result.messages[-1].content, self.request.content)
+        accepted = AcceptedMessage(self.chat.session_id, "999999", str(uuid4()), result)
+        head, legacy = _load_head_or_legacy(accepted, self.factory)
+        self.assertIsNone(head)
+        self.assertEqual(
+            [
+                json.loads(message.text.split("\n", 1)[1])["user"]
+                for message in require_value(legacy)
+            ],
+            [f"question-{i}" for i in range(60)],
+        )
         self.assertEqual(len(self.rows()), 121)  # 组装没有插入当前问题。
 
     def test_same_user_other_chat_only_shares_memory_not_raw_messages(self):
@@ -111,7 +123,7 @@ class AgentInputMySQLTest(unittest.TestCase):
         self.pair("other chat private", chat_id=other.session_id)
         self.memory()
         result = self.prepare()
-        self.assertEqual(result.history_rounds, 0)
+        self.assertEqual(result.included_history_turns, 0)
         self.assertIn("喜欢中文", result.profile_memory)
         self.assertNotIn("other chat private", [m.content for m in result.messages])
         with self.factory() as session:
@@ -146,7 +158,9 @@ class AgentInputMySQLTest(unittest.TestCase):
         original = self.policy
         self.policy = replace(
             self.policy,
-            app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1,
+            app_context_tokens=self.policy.app_context_tokens
+            - self.policy.admission_input_budget_tokens
+            + 1,
         )
         with self.assertRaises(ContextTooLargeError), self.accept():
             self.fail("Must not accept")
@@ -157,19 +171,19 @@ class AgentInputMySQLTest(unittest.TestCase):
         self.policy = original
         with self.accept() as accepted:  # 同一个 key 没有被失败准入消耗。
             self.assertEqual(
-                require_type(accepted, AcceptedMessage).prepared_input.messages[-1].content,
+                require_type(accepted, AcceptedMessage).admission_snapshot.messages[-1].content,
                 self.request.content,
             )
         self.assertEqual(len(self.rows()), 1)
 
     def test_accepted_snapshot_does_not_reload_or_duplicate_current_question(self):
-        old_id = self.pair("previous")
+        self.pair("previous")
         self.memory()
         with self.accept() as accepted:
-            prepared = require_type(accepted, AcceptedMessage).prepared_input
+            prepared = require_type(accepted, AcceptedMessage).admission_snapshot
             self.assertEqual(
                 [m.source_message_id for m in prepared.messages],
-                [old_id, str(int(old_id) + 1), None],
+                [None],
             )
             self.assertEqual(sum(m.content == self.request.content for m in prepared.messages), 1)
             self.assertEqual(len(self.rows()), 3)
@@ -185,7 +199,9 @@ class AgentInputMySQLTest(unittest.TestCase):
         with self.accept() as first:
             self.policy = replace(
                 self.policy,
-                app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1,
+                app_context_tokens=self.policy.app_context_tokens
+                - self.policy.admission_input_budget_tokens
+                + 1,
             )
             with self.accept() as duplicate:
                 self.assertTrue(require_type(duplicate, DuplicateMessageResponse).duplicate)
@@ -193,28 +209,31 @@ class AgentInputMySQLTest(unittest.TestCase):
         self.check.assert_called_once()
         self.assertEqual(len(self.rows()), 1)
 
-    def test_inconsistent_success_cannot_accept_new_question(self):
+    def test_native_bootstrap_rejects_inconsistent_success_before_running_graph(self):
         self.pair("missing answer", missing_answer=True)
         before = self.snapshot_chat()
-        with self.assertRaises(AgentInputUnavailableError), self.accept():
-            self.fail("Must not accept")
+        prepared = self.prepare()
+        accepted = AcceptedMessage(self.chat.session_id, "999999", str(uuid4()), prepared)
+        with self.assertRaisesRegex(ValueError, "Successful legacy turn has no answer"):
+            _load_head_or_legacy(accepted, self.factory)
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.snapshot_chat(), before)
         self.assertEqual(self.registry._entries, {})
 
-    def test_budget_selects_recent_whole_pair_without_deleting_history(self):
-        baseline = self.prepare().estimated_input_tokens
+    def test_admission_budget_does_not_select_or_trim_persisted_history(self):
+        baseline = self.prepare().estimated_local_input_tokens
         self.pair("old large " + "文" * 300)
-        newest = self.pair("new")
+        self.pair("new")
         self.policy = replace(
             self.policy,
             app_context_tokens=self.policy.app_context_tokens
-            - self.policy.input_limit
+            - self.policy.admission_input_budget_tokens
             + baseline
             + 100,
         )
         result = self.prepare()
-        self.assertEqual(result.history_rounds, 1)
-        self.assertTrue(result.history_truncated)
-        self.assertEqual(result.messages[0].source_message_id, newest)
+        self.assertEqual(result.included_history_turns, 0)
+        self.assertFalse(result.input_history_trimmed)
+        self.assertEqual(result.estimated_local_input_tokens, baseline)
+        self.assertEqual([m.content for m in result.messages], [self.request.content])
         self.assertEqual(len(self.rows()), 4)

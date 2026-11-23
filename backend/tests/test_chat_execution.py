@@ -5,7 +5,7 @@ import threading
 import unittest
 from contextlib import contextmanager
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -112,15 +112,15 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(p.stop)
         owner = self
 
-        class FakeTurn:
+        class FakeAttemptState:
             def __init__(self, accepted, *args):
                 self.accepted = accepted
-                self.protocol = []
-                self.facts = {}
-                self.input_messages = accepted.prepared_input.as_agent_messages()
+                self.protocol_messages = []
+                self.profile_facts = {}
+                self.input_messages = accepted.admission_snapshot.to_langchain_messages()
 
-            async def prepare(self):
-                return self.accepted.prepared_input
+            async def load_profile_snapshot(self):
+                return self.accepted.admission_snapshot
 
             def close(self):
                 pass
@@ -130,7 +130,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
                 self.agent = agent
 
             async def astream(self, *args, **kwargs):
-                turn = kwargs["context"].turn
+                attempt_state = kwargs["context"].attempt_state
                 text, reasoning = "", ""
                 stream = self.agent.astream(*args, **kwargs)
                 try:
@@ -138,20 +138,27 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
                         text += chunk.content
                         reasoning += chunk.additional_kwargs.get("reasoning_content", "")
                         yield "messages", (chunk, metadata)
-                    turn.protocol = [
+                    attempt_state.protocol_messages = [
                         AIMessage(content=text, additional_kwargs={"reasoning_content": reasoning})
                     ]
                 finally:
                     await stream.aclose()
 
-        self.build_patch = patch(
-            "app.services.chat_execution.build_chat_agent",
-            side_effect=lambda s, p: StreamAdapter(owner.agent),
-        )
-        self.build = self.build_patch.start()
-        self.addCleanup(self.build_patch.stop)
+        self.build = MagicMock(side_effect=lambda *a, **kw: StreamAdapter(owner.agent))
+        self.provider = MagicMock()
+        self.provider.get = self.build
+        for name, result in (
+            (
+                "prepare_checkpoint_run",
+                {"configurable": {"thread_id": "test", "checkpoint_id": "parent"}},
+            ),
+            ("completed_checkpoint_id", "completed"),
+        ):
+            patched = patch(f"app.services.chat_execution.{name}", AsyncMock(return_value=result))
+            patched.start()
+            self.addCleanup(patched.stop)
 
-        memory_patch = patch("app.services.chat_execution.TurnMemory", FakeTurn)
+        memory_patch = patch("app.services.chat_execution.ChatAttemptState", FakeAttemptState)
         memory_patch.start()
         self.addCleanup(memory_patch.stop)
 
@@ -179,6 +186,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
             input_policy=prepared().policy,
             check_new_message=MagicMock(),
             on_event=kwargs.pop("on_event", self.emit),
+            session_graph_cache=kwargs.pop("session_graph_cache", self.provider),
             **kwargs,
         )
 
@@ -214,7 +222,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
         provider = MagicMock()
         provider.get.return_value = self.build(settings(), prepared().policy)
         self.build.reset_mock()
-        result = await self.run_turn(agent_provider=provider)
+        result = await self.run_turn(session_graph_cache=provider)
         self.assertIsInstance(result, MessageDoneData)
         provider.get.assert_called_once_with(
             settings(), prepared().policy, user_id="42", session_id="42"
@@ -232,7 +240,7 @@ class ChatExecutionTest(unittest.IsolatedAsyncioTestCase):
             patch("app.services.chat_execution.accept_user_message", side_effect=denied),
             self.assertRaises(SessionNotFoundError),
         ):
-            await self.run_turn(agent_provider=provider)
+            await self.run_turn(session_graph_cache=provider)
         provider.get.assert_not_called()
         self.build.assert_not_called()
 

@@ -101,7 +101,7 @@ class ProfileStoreTest(unittest.TestCase):
 
     def test_turn_snapshot_never_follows_later_mutations(self):
         facts = {"preference.language": "中文"}
-        store = ProfileStore.snapshot(1, "index", facts=facts)
+        store = ProfileStore.read_only_snapshot(1, "index", facts=facts)
         facts["preference.language"] = "English"
         self.assertEqual(store.backend().download_files([self.path])[0].content, "中文".encode())
         item = store.get(store.namespace, self.path)

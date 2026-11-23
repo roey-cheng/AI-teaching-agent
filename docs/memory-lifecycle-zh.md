@@ -1,6 +1,6 @@
 # 记忆生命周期：即时工具 + 空闲整理
 
-2026-10-12 起的实现。本文替代旧文档中“每轮先运行独立 Memory Agent”的流程描述；历史设计保留用于追溯。
+2026-10-12 起的实现，按 2026-11-23 的会话存档和命名核查更新。本文替代旧文档中“每轮先运行独立 Memory Agent”的流程描述；历史设计保留用于追溯。
 
 ## 现在谁负责回答、谁负责记忆
 
@@ -29,48 +29,48 @@ flowchart TD
     V --> SB
 ```
 
-这借鉴了“任务内即时更新、任务间整理、按需读取”的记忆生命周期，并不意味着采用了 ChatGPT 的内部实现。存储仍是项目自己的 MySQL，不是 OpenAI 服务。文件接口现已采用原生 Deep Agents `StoreBackend`，主图配置 `store=store`；`checkpointer=None`，重启不会恢复执行到一半的 Agent 图。
+这借鉴了“任务内即时更新、任务间整理、按需读取”的记忆生命周期，并不意味着采用了 ChatGPT 的内部实现。存储仍是项目自己的 MySQL，不是 OpenAI 服务。画像文件接口采用原生 Deep Agents `StoreBackend`，主图配置 `store=profile_store_router`；会话状态另由持久化 checkpointer 管理。失败后仍需明确重试，从已发布存档重新运行，不自动恢复任意工具副作用。
 
 ## StoreBackend 与持久化存储（2026-10-24 更新）
 
-- `factory.py` 直接实例化框架的 `StoreBackend`；已移除自写的 `ProfileMemoryBackend`。读取、分页、目录和文件搜索由框架实现。共享 `RunScopedStore` 没有用户状态，只把操作转交给当前运行上下文的 Store。
+- `factory.py` 直接实例化框架的 `StoreBackend`；已移除自写的 `ProfileMemoryBackend`。读取、分页、目录和文件搜索由框架实现。共享 `ProfileSnapshotStoreRouter` 没有用户状态，只把操作转交给当前运行上下文的 Store。
 - `app/agent/profile_store.py` 的 `ProfileStore` 实现 LangGraph `BaseStore`，把已有 MySQL `agent_memory` 表映射成文件数据。它是项目自己的数据库适配层，不是假设框架自带 MySQL 驱动。
 - 每用户 namespace 为 `("users", str(verified_user_id), "profile")`。用户 ID 来自认证后的业务上下文，不能由模型参数指定。
 - `/memories/topics/<topic>.md` 对应一条已有主题记录；`/memories/profile.md` 是这些记录派生的展示内容，正式模型看到的仍是每轮最多 4 KiB 的简短索引。索引不另外落库、不成为第二份权威数据。
 - Store 有两种明确生命周期：**事务绑定实例**使用调用方的 SQLAlchemy Session 访问 MySQL；**本轮快照实例**只提供固定的只读内容给图。快照内部的 `InMemoryStore` 是临时读取视图，不是长期记忆数据库；数据库读取时也复用其最多 26 个文件的过滤/分页逻辑。
 - 即时保存和空闲整理都经过 `StoreBackend → 事务绑定 ProfileStore → agent_memory`。Store 不自行提交事务；事实审核、版本检查、记忆写入、任务结算仍由业务层控制，相关数据一起提交或回滚。
-- 图上的 Store 不允许写入；Agent 仍调用 `save_profile_facts`，不开放 `write_file/edit_file` 绕过审核。教学 Skill 也在只读快照中，不能被记忆工具覆盖。
+- 图上的画像 Store 不允许写入；Agent 仍调用 `save_profile_facts`，不开放 `write_file/edit_file` 绕过审核。教学 Skill 由独立的只读 FilesystemBackend 提供，不再复制进画像快照。
 
-这次不新增依赖、数据库表或环境变量，不需要搬迁旧记忆。它不是通用沙箱存储：任意文件写入、删除、TTL 和向量搜索仍未启用。未来要存用户上传资料/沙箱产物，应增加独立 namespace 和相应存储实现，不能塞进受限的 Profile 主题表。
+画像 Store 的改造本身没有搬迁旧画像；之后的会话存档改造增加了依赖和存档相关表，需按[迁移说明](langgraph-state-refactor.md)处理。画像 Store 不是通用沙箱存储：任意文件写入、删除、TTL 和向量搜索仍未启用。未来的上传资料/沙箱产物不能塞进受限的 Profile 主题表。
 
 ## 图的生命周期：复用结构，不复用用户状态
 
-`build_chat_agent(settings, policy)` 现在只接收固定配置，返回可复用的编译图。
-FastAPI 的 `BackendRuntime.chat_agents` 按已校验归属的 `(user_id, session_id)` 缓存图。
+`compile_chat_graph(settings, policy, checkpointer=...)` 接收固定配置和存档器，返回可复用的编译图。
+FastAPI 的 `BackendRuntime.session_graph_cache` 按已校验归属的 `(user_id, session_id)` 缓存图。
 同一会话第一轮真正执行时创建自己的图，后续消息与重试复用它；不同会话使用不同图，
-即使属于同一个用户也不共享。CLI 在自己的循环中也持有一个 `ChatAgentProvider`，切换新会话会创建另一张图。
+即使属于同一个用户也不共享。CLI 在自己的循环中也持有一个 `SessionChatGraphCache`，切换新会话会创建另一张图。
 缓存随进程存活，重启后按需重建；数据库中的历史和长期记忆不受影响。
 配置不同的应用实例不共享图；配置运行中改变时要求重启，不缓存多份密钥或静默套用旧策略。
 
-每次执行通过 `prepare_run_context(prepared, turn)` 创建独立 `ChatRunContext`，再传入
-`agent.astream(..., context=context)`。该上下文包含当前用户的记忆快照、有效生成权限和本轮 `TurnMemory`。
-会话图内跨轮复用的中间件没有 `self.turn`，工具也不绑定 `turn.read/turn.save`；它们通过 LangGraph runtime 找到本次调用的 turn。
+每次执行通过 `build_chat_run_dependencies(admission_snapshot, attempt_state)` 创建独立 `ChatRunDependencies`，再传入
+`chat_graph.astream(..., context=run_dependencies)`。它包含当前用户的准入快照、只读画像 Store 和本次生成尝试的 `ChatAttemptState`，不是聊天历史。
+会话图内跨轮复用的中间件不持有上次尝试对象；工具通过 LangGraph runtime 找到本次 `attempt_state`。
 StoreBackend 的 namespace 和 Store 操作同样从 runtime 获取，因此不会用到上一轮过期的记忆快照。
 
-同一个 context 只能运行一次；下一轮或重试必须创建新 context。计数、读取记录、协议、输出及取消作用域各自独立。
-`checkpointer=None` 保持不变：图复用不会自动记住上次运行的 state，历史照旧从 MySQL 按会话重建。
-正式聊天使用异步图执行；无工具离线探针可使用 `with_memory_tools=False`。
-独立调用 `execute_chat_turn/execute_chat_retry` 时应传同一个 `agent_provider` 才能复用；省略只用于一次性运行。
+同一份运行依赖只能运行一次；下一轮或重试必须创建新对象。计数、读取记录、协议、输出及取消作用域各自独立。
+每轮仅提交新问题，历史由 checkpointer 按本会话已发布的存档恢复；图缓存淘汰不删除存档。
+正式聊天使用异步图执行；无工具离线探针可使用 `enable_chat_tools=False`。
+独立调用 `execute_chat_turn/execute_chat_retry` 也必须提供 `session_graph_cache`，不允许静默降级到无存档执行。
 
 ## 渐进读取与工具协议
 
 每轮初始只向模型提供最多 4 KiB 的确定性索引：主题、前 32 个字符预览、是否截断。它不是第二份可编辑记忆。模型需要完整内容时调用读取工具；更新已有主题前，工具强制要求先读完整主题。每个主题仍是最多 500 字符的完整摘要，保存时应保留未被更正的旧事实。
 
-`/memories/profile.md` 仍是只读虚拟文件，这次装的是索引，不是宿主机磁盘路径。没有开放 shell、任意文件、子 Agent 委派或模型指定 user_id 的能力。输入检查会计算框架提示、实际工具 schema、历史推理和工具结果；超限不会静默截断当前问题，历史只能整轮移除。
+`/memories/profile.md` 仍是只读虚拟文件，装的是索引，不是宿主机磁盘路径。没有开放 shell、任意文件、子 Agent 委派或模型指定 user_id 的能力。输入检查会计算框架提示、实际工具 schema、历史推理和工具结果；长历史由原生摘要中间件压缩并归档，最终请求仍检查预算，不静默截断当前问题。
 
-DeepSeek thinking + tools 需要回传模型实际返回的 `reasoning_content` 和配对工具消息。`ProtocolChatDeepSeek` 补齐当前上游适配器序列化时遗漏的字段：不伪造推理，不为缺字段的旧回答填空串。旧历史转为明确标记的不可信引用上下文；新历史使用内部保存的完整协议。
+DeepSeek thinking + tools 需要回传模型实际返回的 `reasoning_content` 和配对工具消息。`ReasoningReplayChatDeepSeek` 补齐当前上游适配器序列化时遗漏的字段：不伪造推理，不为缺字段的旧回答填空串。旧历史转为明确标记的不可信引用上下文；新历史使用内部保存的完整协议。
 
-模型正文在工具调用前可能先输出“我先查看一下”。SSE 新增 `model_step`（`start` / `tool` / `final`）；网页把工具前导文字移到“处理步骤”，只把最终答案写入公开聊天正文。终端用步骤标签区分。工具参数不会作为回答正文直接输出。
+模型正文在工具调用前可能先输出“我先查看一下”。SSE 的 `model_step`（`start` / `tool` / `final`）保持不变；网页把这些文字放进“助手中间消息”，不把它们叫作工具执行结果，只把最终答案写入公开聊天正文。终端用步骤标签区分。工具参数不会作为回答正文直接输出。
 
 ## 两种保存时机
 
@@ -102,7 +102,7 @@ DeepSeek thinking + tools 需要回传模型实际返回的 `reasoning_content` 
 
 持久保存 API 返回的推理及工具协议。完整协议仍不出现在历史或记忆 API 中；新增 `GET /api/v1/chat/sessions/{session_id}/messages/{message_id}/reasoning`，仅允许登录用户读取自己成功回答对应的推理文本，返回 `{message_id, available, steps: [{step, text}]}`。不会返回工具参数、工具结果或后台整理记录。旧回答没有记录或推理为空时返回 `available: false`；损坏记录或数据库故障返回安全的 503，不补造历史推理。
 
-网页在每条历史回答上方默认收起“查看模型思考”，首次展开才请求，按模型步骤以纯文本展示。响应禁止缓存，前端仅在当前组件内暂存，切换会话或退出账号清理；原有实时推理流保留。刷新后可再次读取，不需要新迁移或额外模型调用。
+网页在每条历史回答上方默认收起“查看模型思考”，首次展开才请求，按“推理片段”以纯文本展示；编号不宣称对应真实思维步骤。响应禁止缓存，前端仅在当前组件内暂存，切换会话或退出账号清理；原有实时推理流保留。刷新后可再次读取，不需要新迁移或额外模型调用。
 
 这是将原本内部保存的推理文本开放给记录所属用户：推理文本可能复述输入、提示或工具信息，字段白名单不等于内容脱敏，也不保证推理正确。未来接入隐藏测试和私有诊断前，必须重新审查实时与历史推理展示边界。数据仍需同聊天一样的访问控制和备份保护。尚未增加自动 TTL、用户删除或更正管理页面；删除用户/会话时必须一并处理新表外键，不能只删 `messages`。
 
@@ -110,7 +110,7 @@ DeepSeek thinking + tools 需要回传模型实际返回的 `reasoning_content` 
 
 ## 迁移与分阶段启用
 
-新 Alembic head：`20261012_0003`，新增四张表。不要在本地终端连接生产库直接试命令。按现有维护流程，备份并停止旧后端（包括连接同库的终端/副本），确认退出后在目标后端环境执行：
+画像整理最初在 `20261012_0003` 新增四张表；当前 Alembic head 已是 `20261025_0005`，并需执行原生 saver 的建表流程，详见[当前迁移说明](langgraph-state-refactor.md)。不要在本地终端连接生产库直接试命令。备份并停止旧后端（包括连接同库的终端/副本）后，在目标后端环境执行：
 
 ```bash
 uv run --no-sync python -m app.db.migrate
@@ -146,8 +146,8 @@ Worker 由 FastAPI lifespan 管理，无需额外服务、Redis 或新密钥。C
 - `tests/test_memory_orchestrator.py`：真实 Deep Agents 图 + 本地假模型，禁止网络。
 - `tests/test_memory_mysql.py`：显式指定隔离测试容器，验证迁移、恢复、冲突及真实执行链路；默认离线测试跳过。
 
-在 `backend/` 运行离线测试：`uv run python -m unittest discover -s tests`。原有完整数据库验收入口仍是 `uv run python scripts/check_migration_mysql.py`，它自己新建并销毁临时容器，不使用项目库。前端 `npm run build` 包含测试、类型检查和构建。
+在 `backend/` 运行离线测试：`uv run python -m unittest discover -s tests`。数据库测试需要显式隔离环境。旧 `scripts/check_migration_mysql.py` 的部分迁移版本/主题断言仍待跟进，不应把旧运行记录当作当前全套验收；本次检查结果见[命名核查计划](naming-audit-plan.md)。前端 `npm run build` 包含测试、类型检查和构建。
 
 本轮假模型验证不等同于已验证真实 DeepSeek thinking/tool 协议、模型提取质量或公网 SSE 链路；正式启用前还需要人工验收，会消耗模型余额。
 
-本轮验证：472 项离线测试、13 项新增隔离 MySQL 记忆测试、原有 154 项 MySQL 端到端测试通过；真实 MySQL 上迁移升级、重跑、降级、再次升级及 Alembic schema 检查通过。前端 6 项测试、TypeScript 检查、生产构建通过；后端 Ruff 与 Basedpyright 检查通过。只使用临时 MySQL 和模型替身，没有迁移现有开发/生产库，也没有执行发布。
+历史阶段验证（2026-10-12）：472 项离线测试、13 项新增隔离 MySQL 记忆测试、原有 154 项 MySQL 端到端测试通过。这些数字不代表当前版本；最新命名修改的检查结果见[命名核查计划](naming-audit-plan.md)。历史验证只使用临时 MySQL 和模型替身，没有迁移现有开发/生产库或执行发布。

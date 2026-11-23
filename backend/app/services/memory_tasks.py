@@ -12,8 +12,8 @@ from app.models import (
     ChatSession,
     GenerationAttempt,
     GenerationControl,
-    MemoryJob,
-    MemoryState,
+    MemoryConsolidationJob,
+    MemoryConsolidationState,
     MemoryTopicRevision,
     Message,
 )
@@ -33,12 +33,13 @@ def control_lock(session):
         raise RuntimeError("Memory control unavailable")
 
 
-def touch_memory(session, user_id, now, *, dirty=False, message_id=None):
+def record_consolidation_activity(session, user_id, now, *, dirty=False, message_id=None):
+    """Record activity and pending evidence for consolidation; do not write profile facts."""
     # Callers serialize through generation_control, after locking their chat/message.
     control_lock(session)
-    state = session.get(MemoryState, user_id)
+    state = session.get(MemoryConsolidationState, user_id)
     if state is None:
-        state = MemoryState(
+        state = MemoryConsolidationState(
             user_id=user_id, cursor=0, pending_ids=[], dirty=False, failures=0, paused=False
         )
         session.add(state)
@@ -86,7 +87,9 @@ def check_and_bump_revisions(session, user_id, keys, source_ids, expected):
 
 
 @dataclass(frozen=True)
-class ClaimedMemoryJob:
+class ClaimedConsolidationJob:
+    """Immutable inputs captured when a background consolidation job is claimed."""
+
     job_id: str
     user_id: int
     sources: tuple[dict, ...] = field(repr=False)
@@ -107,25 +110,30 @@ def claim_memory_job(factory, settings, global_concurrency, now=None):
             return None
         if (
             session.scalar(
-                select(func.count()).select_from(MemoryJob).where(MemoryJob.status == "RUNNING")
+                select(func.count())
+                .select_from(MemoryConsolidationJob)
+                .where(MemoryConsolidationJob.status == "RUNNING")
             )
             or global_concurrency < 1
         ):
             return None
         global_used = session.scalar(
-            select(func.count()).select_from(MemoryJob).where(MemoryJob.quota_date == now.date())
+            select(func.count())
+            .select_from(MemoryConsolidationJob)
+            .where(MemoryConsolidationJob.quota_date == now.date())
         )
         if global_used >= settings.global_daily_limit:
             return None
         states = session.scalars(
-            select(MemoryState)
+            select(MemoryConsolidationState)
             .where(
-                MemoryState.dirty.is_(True),
-                MemoryState.paused.is_(False),
-                MemoryState.due_at <= now,
-                MemoryState.last_activity_at <= now - timedelta(seconds=settings.idle_seconds),
+                MemoryConsolidationState.dirty.is_(True),
+                MemoryConsolidationState.paused.is_(False),
+                MemoryConsolidationState.due_at <= now,
+                MemoryConsolidationState.last_activity_at
+                <= now - timedelta(seconds=settings.idle_seconds),
             )
-            .order_by(MemoryState.due_at)
+            .order_by(MemoryConsolidationState.due_at)
             .limit(100)
         ).all()
         for state in states:
@@ -138,8 +146,11 @@ def claim_memory_job(factory, settings, global_concurrency, now=None):
                 continue
             used = session.scalar(
                 select(func.count())
-                .select_from(MemoryJob)
-                .where(MemoryJob.user_id == state.user_id, MemoryJob.quota_date == now.date())
+                .select_from(MemoryConsolidationJob)
+                .where(
+                    MemoryConsolidationJob.user_id == state.user_id,
+                    MemoryConsolidationJob.quota_date == now.date(),
+                )
             )
             if used >= settings.user_daily_limit:
                 state.due_at = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
@@ -187,7 +198,7 @@ def claim_memory_job(factory, settings, global_concurrency, now=None):
                 # Never silently truncate a source then advance its cursor.
                 state.paused = True
                 session.add(
-                    MemoryJob(
+                    MemoryConsolidationJob(
                         job_id=str(uuid4()),
                         user_id=state.user_id,
                         quota_date=now.date(),
@@ -202,7 +213,7 @@ def claim_memory_job(factory, settings, global_concurrency, now=None):
                 if global_used >= settings.global_daily_limit:
                     return None
                 continue
-            job = MemoryJob(
+            job = MemoryConsolidationJob(
                 job_id=str(uuid4()),
                 user_id=state.user_id,
                 quota_date=now.date(),
@@ -211,7 +222,9 @@ def claim_memory_job(factory, settings, global_concurrency, now=None):
                 created_at=now,
             )
             session.add(job)
-            return ClaimedMemoryJob(job.job_id, state.user_id, tuple(sources), facts, versions)
+            return ClaimedConsolidationJob(
+                job.job_id, state.user_id, tuple(sources), facts, versions
+            )
     return None
 
 
@@ -219,11 +232,11 @@ def fail_memory_job(factory, job_id, code="MEMORY_JOB_FAILED", now=None):
     now = now or utcnow()
     with factory.begin() as session:
         control_lock(session)
-        job = session.get(MemoryJob, job_id)
+        job = session.get(MemoryConsolidationJob, job_id)
         if job is None or job.status != "RUNNING":
             return  # Includes a successful but ambiguously acknowledged commit.
         job.status, job.finished_at, job.error_code = "FAILED", now, code
-        state = session.get(MemoryState, job.user_id)
+        state = session.get(MemoryConsolidationState, job.user_id)
         state.failures += 1
         state.paused = state.failures >= 3
         state.due_at = now + timedelta(seconds=60 if state.failures == 1 else 300)
@@ -232,7 +245,13 @@ def fail_memory_job(factory, job_id, code="MEMORY_JOB_FAILED", now=None):
 def recover_memory_jobs(factory):
     # Only run after acquiring the existing database-wide backend lock.
     with factory() as session:
-        ids = list(session.scalars(select(MemoryJob.job_id).where(MemoryJob.status == "RUNNING")))
+        ids = list(
+            session.scalars(
+                select(MemoryConsolidationJob.job_id).where(
+                    MemoryConsolidationJob.status == "RUNNING"
+                )
+            )
+        )
     for job_id in ids:
         fail_memory_job(factory, job_id, "MEMORY_JOB_INTERRUPTED")
 
@@ -264,7 +283,7 @@ def finish_memory_job(factory, claimed, candidates, now=None):
         evidence[fact.memory_key] = item.source_message_id
     with factory.begin() as session:
         control_lock(session)
-        job = session.get(MemoryJob, claimed.job_id)
+        job = session.get(MemoryConsolidationJob, claimed.job_id)
         if job is None or job.user_id != claimed.user_id or job.source_ids != list(sources):
             raise ValueError("Invalid memory job")
         if job.status == "SUCCEEDED":
@@ -275,7 +294,7 @@ def finish_memory_job(factory, claimed, candidates, now=None):
         save_profile_files(
             session, claimed.user_id, sorted(checked, key=lambda fact: fact.memory_key), now
         )
-        state = session.get(MemoryState, claimed.user_id)
+        state = session.get(MemoryConsolidationState, claimed.user_id)
         state.cursor = max(state.cursor, *job.source_ids)
         state.pending_ids = [mid for mid in state.pending_ids if mid not in job.source_ids]
         state.dirty = bool(state.pending_ids)

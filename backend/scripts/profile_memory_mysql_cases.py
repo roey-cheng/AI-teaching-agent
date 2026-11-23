@@ -16,7 +16,7 @@ from app.agent.input_policy import policy_for_model
 from app.db.session import build_session_factory
 from app.models import AgentMemory, Message
 from app.schemas import RegisterRequest, SendMessageRequest
-from app.services.agent_input import prepare_agent_input
+from app.services.agent_input import prepare_chat_admission
 from app.services.auth import register_user
 from app.services.chat_sessions import create_chat_session
 from app.services.errors import MemoryUnavailableError, SessionNotFoundError
@@ -136,7 +136,7 @@ class ProfileMemoryMySQLTest(unittest.TestCase):
             )
         second = create_chat_session(self.user, self.factory)
         with self.factory() as session:
-            prepared = prepare_agent_input(
+            prepared = prepare_chat_admission(
                 session,
                 self.user,
                 second.session_id,
@@ -146,7 +146,7 @@ class ProfileMemoryMySQLTest(unittest.TestCase):
                 self.policy,
             )
         self.assertIn("喜欢中文", prepared.profile_memory)
-        self.assertEqual(prepared.history_rounds, 0)
+        self.assertEqual(prepared.included_history_turns, 0)
         self.assertEqual(len(prepared.messages), 1)
 
     def test_foreign_identity_and_finished_attempt_cannot_write(self):
@@ -154,8 +154,9 @@ class ProfileMemoryMySQLTest(unittest.TestCase):
         with self.accepted() as accepted:
             forged = replace(
                 accepted,
-                prepared_input=replace(
-                    require_type(accepted, AcceptedMessage).prepared_input, user_id=other.user_id
+                admission_snapshot=replace(
+                    require_type(accepted, AcceptedMessage).admission_snapshot,
+                    user_id=other.user_id,
                 ),
             )
             with self.assertRaises(SessionNotFoundError):
