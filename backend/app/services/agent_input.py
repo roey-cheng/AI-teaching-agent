@@ -1,15 +1,15 @@
-"""新发送/重试准入时组装输入快照；只读取本会话历史和本用户记忆，不调用 Agent。"""
+"""准入检查新消息与画像；会话历史由 LangGraph checkpoint 管理。"""
 
 from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from app.agent.input_policy import AgentInputPolicy, estimate_message_tokens, estimate_text_tokens
 from app.agent.profile_store import PROFILE_MEMORY_PATH, ProfileStore
-from app.models import ChatSession, Message
+from app.models import ChatSession
 from app.schemas import SendMessageRequest, UserResponse
 from app.schemas._validation import format_database_id
 from app.services.errors import (
@@ -27,22 +27,28 @@ class InputMessage:
 
 
 @dataclass(frozen=True)
-class PreparedAgentInput:
-    """内部不可变快照；不把聊天/记忆正文放进 repr 或公开 API 回执。"""
+class ChatAdmissionSnapshot:
+    """准入阶段的不可变快照，不是最终发给模型的完整输入。
+
+    正式聊天的 messages 只含本条问题；完整会话状态由 checkpoint 恢复。
+    兼容流程也可提供本地消息列表，下面的历史计数和裁剪标记只描述该列表，
+    不描述 checkpoint 中保存的全部历史。正文不进入 repr 或公开 API 回执。
+    """
 
     user_id: str
     session_id: str
     policy: AgentInputPolicy
     messages: tuple[InputMessage, ...] = field(repr=False)
     profile_memory: str = field(repr=False)
-    estimated_input_tokens: int
-    history_rounds: int
-    history_truncated: bool
+    # 准入/兼容流程最近一次计算的本地估算；刷新画像不自动重算，不含 checkpoint 历史。
+    estimated_local_input_tokens: int
+    included_history_turns: int
+    input_history_trimmed: bool
     counting_method: str = "utf8_bytes_conservative_estimate"
     memory_path: str = "/memories/profile.md"
 
-    def as_agent_messages(self) -> list[HumanMessage | AIMessage]:
-        """供未来 agent.astream 的 messages 使用；每次返回新对象，不带 system/记忆副本。"""
+    def to_langchain_messages(self) -> list[HumanMessage | AIMessage]:
+        """只转换本地消息列表；不恢复 checkpoint、不追加系统提示或画像。"""
         return [
             HumanMessage(content=item.content)
             if item.role == "user"
@@ -61,7 +67,7 @@ def _profile_memory(session: Session, user_id: int) -> str:
         raise AgentInputUnavailableError() from None
 
 
-def prepare_agent_input(
+def prepare_chat_admission(
     session: Session,
     current_user: UserResponse,
     session_id: str,
@@ -69,12 +75,12 @@ def prepare_agent_input(
     policy: AgentInputPolicy,
     *,
     retry_message_id: str | None = None,
-) -> PreparedAgentInput:
-    """复用准入事务，返回后不再重新加载另一份历史或记忆。
+) -> ChatAdmissionSnapshot:
+    """复用准入事务，只检查本条消息，不裁剪或重建会话历史。
 
     不开启/提交事务、不写数据、不领取运行锁；调用者负责连接生命周期。
     新发送的问题尚未落库；重试的问题由准入层读取并验证为最后一个失败问题。
-    重试时显式排除原问题的历史行，再把原文加入末尾一次，不插入新的数据库消息。
+    重试快照仍只含原问题一次，并保留其消息编号；这里不读取或重建历史。
     """
     chat_id = int(format_database_id(session_id, "Session ID"))
     user_id = int(format_database_id(current_user.user_id, "User ID"))
@@ -101,78 +107,20 @@ def prepare_agent_input(
             + estimate_message_tokens(request.content)
             + 256  # 外层序列化/路径等开销。
         )
-        if used > policy.input_limit:
+        if used > policy.admission_input_budget_tokens:
             raise ContextTooLargeError()
 
-        question, answer = aliased(Message), aliased(Message)
-        selected = []
-        before = None
-        truncated = False
-        while True:
-            query = (
-                select(question, answer)
-                .outerjoin(
-                    answer,
-                    answer.in_reply_to_message_id == question.message_id,
-                )
-                .where(
-                    question.chat_session_id == chat_id,
-                    question.role == "USER",
-                    question.generation_status == "SUCCEEDED",
-                )
-            )
-            if retry_id is not None:
-                query = query.where(question.message_id != retry_id)
-            if before is not None:
-                timestamp, message_id = before
-                query = query.where(
-                    or_(
-                        question.created_at < timestamp,
-                        and_(question.created_at == timestamp, question.message_id < message_id),
-                    )
-                )
-            # 50 是一次 SQL 读取批量，不是上下文的轮数上限。
-            batch = session.execute(
-                query.order_by(
-                    question.created_at.desc(),
-                    question.message_id.desc(),
-                ).limit(50)
-            ).all()
-            for q, a in batch:
-                if (
-                    a is None
-                    or a.role != "ASSISTANT"
-                    or a.chat_session_id != chat_id
-                    or a.in_reply_to_message_id != q.message_id
-                ):
-                    raise AgentInputUnavailableError()
-                cost = estimate_message_tokens(q.content) + estimate_message_tokens(a.content)
-                if used + cost > policy.input_limit:
-                    truncated = True
-                    break  # 不跳过最近的大轮次去塞更早的小轮次。
-                selected.append(
-                    (
-                        InputMessage("user", q.content, str(q.message_id)),
-                        InputMessage("assistant", a.content, str(a.message_id)),
-                    )
-                )
-                used += cost
-            if truncated or len(batch) < 50:
-                break
-            last_question = batch[-1][0]
-            before = (last_question.created_at, last_question.message_id)
-
-        messages = tuple(item for pair in reversed(selected) for item in pair)
-        return PreparedAgentInput(
+        return ChatAdmissionSnapshot(
             user_id=str(user_id),
             session_id=str(chat_id),
             policy=policy,
-            messages=messages
-            + (InputMessage("user", request.content, None if retry_id is None else str(retry_id)),),
+            messages=(
+                InputMessage("user", request.content, None if retry_id is None else str(retry_id)),
+            ),
             profile_memory=memory,
-            estimated_input_tokens=used,
-            history_rounds=len(selected),
-            history_truncated=truncated,
+            estimated_local_input_tokens=used,
+            included_history_turns=0,
+            input_history_trimmed=False,
         )
     except SQLAlchemyError:
         raise AgentInputUnavailableError() from None

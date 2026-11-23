@@ -1,4 +1,4 @@
-"""输入组装离线测试：不会读取 .env、访问网络或调用真实模型。"""
+"""准入快照离线测试：不会读取 .env、访问网络或调用真实模型。"""
 
 import unittest
 from dataclasses import FrozenInstanceError, replace
@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.agent.input_policy import estimate_message_tokens, estimate_text_tokens, policy_for_model
 from app.models import AgentMemory, Message
 from app.schemas import SendMessageRequest, UserResponse
-from app.services.agent_input import prepare_agent_input
+from app.services.agent_input import prepare_chat_admission
 from app.services.errors import (
     AgentInputUnavailableError,
     ContextTooLargeError,
@@ -35,7 +35,7 @@ class AgentInputTest(unittest.TestCase):
         self.policy = policy_for_model("deepseek-v4-pro")
 
     def prepare(self):
-        return prepare_agent_input(self.session, self.user, "10", self.request, self.policy)
+        return prepare_chat_admission(self.session, self.user, "10", self.request, self.policy)
 
     def pair(self, number, question="Question", answer="Answer"):
         now = datetime(2026, 9, 26)
@@ -60,7 +60,9 @@ class AgentInputTest(unittest.TestCase):
     def set_input_limit(self, limit):
         self.policy = replace(
             self.policy,
-            app_context_tokens=limit + self.policy.app_context_tokens - self.policy.input_limit,
+            app_context_tokens=limit
+            + self.policy.app_context_tokens
+            - self.policy.admission_input_budget_tokens,
         )
 
     def test_empty_history_and_memory_preserves_current_body_once(self):
@@ -68,58 +70,55 @@ class AgentInputTest(unittest.TestCase):
         self.assertEqual(len(result.messages), 1)
         self.assertEqual(result.messages[0].content, self.request.content)
         self.assertIsNone(result.messages[0].source_message_id)
-        self.assertEqual((result.history_rounds, result.history_truncated), (0, False))
+        self.assertEqual((result.included_history_turns, result.input_history_trimmed), (0, False))
         self.assertEqual(result.counting_method, "utf8_bytes_conservative_estimate")
         self.assertEqual(result.memory_path, "/memories/profile.md")
         self.session.add.assert_not_called()
         self.session.commit.assert_not_called()
 
-    def test_successful_pairs_are_chronological_and_current_is_last(self):
+    def test_history_is_not_reconstructed_during_admission(self):
         self.session.execute.return_value.all.return_value = [
             self.pair(3),
             self.pair(2),
             self.pair(1),
         ]
         result = self.prepare()
-        self.assertEqual(
-            [m.source_message_id for m in result.messages], ["2", "3", "4", "5", "6", "7", None]
-        )
-        self.assertEqual([m.role for m in result.messages], ["user", "assistant"] * 3 + ["user"])
+        self.assertEqual([m.source_message_id for m in result.messages], [None])
+        self.assertEqual([m.role for m in result.messages], ["user"])
+        self.session.execute.assert_not_called()
 
-    def test_no_twenty_round_cap_and_database_batches_use_id_tiebreaker(self):
+    def test_large_legacy_history_does_not_trigger_history_queries(self):
         self.session.execute.return_value.all.side_effect = [
             [self.pair(i) for i in range(60, 10, -1)],
             [self.pair(i) for i in range(10, 0, -1)],
         ]
         result = self.prepare()
-        self.assertEqual(result.history_rounds, 60)
-        self.assertFalse(result.history_truncated)
-        query = self.session.execute.call_args.args[0].compile(dialect=mysql.dialect())
-        self.assertIn("created_at =", str(query))
-        self.assertIn("message_id <", str(query))
+        self.assertEqual(result.included_history_turns, 0)
+        self.assertFalse(result.input_history_trimmed)
+        self.session.execute.assert_not_called()
 
     def test_exact_budget_boundary_and_one_token_less(self):
-        used = self.prepare().estimated_input_tokens
+        used = self.prepare().estimated_local_input_tokens
         self.set_input_limit(used)
-        self.assertEqual(self.prepare().estimated_input_tokens, used)
+        self.assertEqual(self.prepare().estimated_local_input_tokens, used)
         self.set_input_limit(used - 1)
         with self.assertRaises(ContextTooLargeError):
             self.prepare()
 
-    def test_newest_large_pair_stops_selection_not_skipped(self):
-        base = self.prepare().estimated_input_tokens
+    def test_large_legacy_pair_is_not_counted_in_admission_budget(self):
+        base = self.prepare().estimated_local_input_tokens
         self.set_input_limit(base + 100)
         self.session.execute.return_value.all.return_value = [
             self.pair(2, "x" * 200),
             self.pair(1, "q", "a"),
         ]
         result = self.prepare()
-        self.assertEqual(result.history_rounds, 0)
-        self.assertTrue(result.history_truncated)
+        self.assertEqual(result.included_history_turns, 0)
+        self.assertFalse(result.input_history_trimmed)
         self.assertEqual(result.messages[0].content, self.request.content)
 
-    def test_whole_pairs_only_and_newest_successful_suffix(self):
-        base = self.prepare().estimated_input_tokens
+    def test_local_snapshot_never_includes_legacy_history_pairs(self):
+        base = self.prepare().estimated_local_input_tokens
         self.set_input_limit(base + estimate_message_tokens("q") + estimate_message_tokens("a"))
         self.session.execute.return_value.all.return_value = [
             self.pair(3, "q", "a"),
@@ -127,16 +126,15 @@ class AgentInputTest(unittest.TestCase):
             self.pair(1),
         ]
         result = self.prepare()
-        self.assertEqual([m.source_message_id for m in result.messages], ["6", "7", None])
-        self.assertTrue(result.history_truncated)
+        self.assertEqual([m.source_message_id for m in result.messages], [None])
+        self.assertFalse(result.input_history_trimmed)
 
-    def test_history_query_scopes_session_role_and_success(self):
+    def test_ownership_query_scopes_session_and_user(self):
         self.prepare()
-        compiled = self.session.execute.call_args.args[0].compile(dialect=mysql.dialect())
-        self.assertIn("outer join", str(compiled).lower())
+        compiled = self.session.scalar.call_args.args[0].compile(dialect=mysql.dialect())
         self.assertIn(10, compiled.params.values())
-        self.assertIn("USER", compiled.params.values())
-        self.assertIn("SUCCEEDED", compiled.params.values())
+        self.assertIn(123, compiled.params.values())
+        self.session.execute.assert_not_called()
 
     def test_owner_check_precedes_reading_memory_or_messages(self):
         self.session.scalar.return_value = None
@@ -149,7 +147,7 @@ class AgentInputTest(unittest.TestCase):
         self.assertIn(10, params.values())
 
     def test_memory_is_separate_user_data_counted_without_becoming_chat(self):
-        base = self.prepare().estimated_input_tokens
+        base = self.prepare().estimated_local_input_tokens
         self.session.scalars.return_value.all.return_value = [
             AgentMemory(
                 user_id=123,
@@ -160,14 +158,14 @@ class AgentInputTest(unittest.TestCase):
         ]
         result = self.prepare()
         self.assertIn("中文\\n", result.profile_memory)
-        self.assertGreater(result.estimated_input_tokens, base)
+        self.assertGreater(result.estimated_local_input_tokens, base)
         self.assertEqual(len(result.messages), 1)
         params = self.session.scalars.call_args.args[0].compile().params
         self.assertIn(123, params.values())
         self.assertNotIn("中文", result.policy.system_prompt)
 
     def test_memory_can_make_required_input_too_large(self):
-        self.set_input_limit(self.prepare().estimated_input_tokens)
+        self.set_input_limit(self.prepare().estimated_local_input_tokens)
         self.session.scalars.return_value.all.return_value = [
             AgentMemory(
                 user_id=123,
@@ -192,16 +190,16 @@ class AgentInputTest(unittest.TestCase):
             self.prepare()
         self.assertNotIn("private", str(caught.exception))
 
-    def test_inconsistent_success_pair_is_not_silently_included(self):
+    def test_legacy_validation_is_deferred_to_one_time_checkpoint_bootstrap(self):
         q, a = self.pair(1)
         for bad in (None, replace_answer(a, "USER", 10), replace_answer(a, "ASSISTANT", 99)):
             with self.subTest(answer=bad):
                 self.session.execute.return_value.all.return_value = [(q, bad)]
-                with self.assertRaises(AgentInputUnavailableError):
-                    self.prepare()
+                self.assertEqual(len(self.prepare().messages), 1)
+                self.session.execute.assert_not_called()
 
     def test_database_errors_are_sanitized(self):
-        self.session.execute.side_effect = SQLAlchemyError("private SQL values")
+        self.session.scalar.side_effect = SQLAlchemyError("private SQL values")
         with self.assertRaises(AgentInputUnavailableError) as caught:
             self.prepare()
         self.assertNotIn("private", str(caught.exception))
@@ -210,22 +208,22 @@ class AgentInputTest(unittest.TestCase):
         result = self.prepare()
         with self.assertRaises(FrozenInstanceError):
             setattr(result, "profile_memory", "changed")  # noqa: B010 -- 故意测试冻结对象拒绝运行时写入。
-        first = result.as_agent_messages()
+        first = result.to_langchain_messages()
         first[0].content = "changed"
-        self.assertEqual(result.as_agent_messages()[0].content, self.request.content)
+        self.assertEqual(result.to_langchain_messages()[0].content, self.request.content)
         self.assertNotIn(self.request.content, repr(result))
         self.request.content = "mutated request"
         self.assertNotEqual(result.messages[-1].content, self.request.content)
 
     def test_tools_and_system_prompt_are_included_in_estimate(self):
-        base = self.prepare().estimated_input_tokens
+        base = self.prepare().estimated_local_input_tokens
         self.policy = replace(
             self.policy,
             system_prompt=self.policy.system_prompt + "xxx",
             tool_definitions_json='[{"name":"example"}]',
         )
         self.assertEqual(
-            self.prepare().estimated_input_tokens - base,
+            self.prepare().estimated_local_input_tokens - base,
             3 + len(self.policy.tool_definitions_json) - 2,
         )
 
@@ -244,7 +242,7 @@ class InputPolicyTest(unittest.TestCase):
     def test_model_limits_and_all_reservations_are_accounted_for(self):
         policy = policy_for_model("deepseek-v4-pro")
         self.assertEqual(policy.model_context_tokens, 1_048_576)
-        self.assertEqual(policy.input_limit, 45_056)
+        self.assertEqual(policy.admission_input_budget_tokens, 45_056)
         self.assertLessEqual(policy.app_context_tokens, policy.model_context_tokens)
 
     def test_unknown_model_fails_closed(self):

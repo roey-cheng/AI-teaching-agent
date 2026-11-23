@@ -3,13 +3,15 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
+from contextlib import AbstractContextManager, AsyncExitStack, asynccontextmanager, contextmanager
+from dataclasses import replace
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.agent.factory import SessionChatGraphCache
 from app.api.accounts import router as accounts_router
 from app.api.chat_messages import router as messages_router
 from app.api.chat_sessions import router as sessions_router
@@ -20,6 +22,7 @@ from app.core.async_work import complete_before_cancelling, complete_in_thread
 from app.core.config import MemorySettings, load_database_settings, load_turnstile_settings
 from app.core.http_config import HTTPSettings
 from app.core.runtime import BackendRuntime, open_backend_runtime
+from app.db.checkpoints import open_checkpoint_saver
 from app.db.engine import build_database_engine
 from app.db.runtime_guard import DatabaseRuntimeLockError
 from app.services.errors import StartupCleanupError
@@ -65,6 +68,7 @@ def create_app(
         scope = (runtime_factory or configured_runtime)()
         entered = False
         memory_task = None
+        checkpoint_scope = AsyncExitStack()
 
         def enter():
             nonlocal entered
@@ -75,6 +79,17 @@ def create_app(
         try:
             # 取消也必须等数据库线程返回，再退出作用域释放进程锁。
             runtime = await complete_in_thread(enter)
+            if runtime.session_graph_cache is None:
+                engine = runtime.session_factory.kw.get("bind")
+                if not isinstance(engine, Engine):
+                    raise StartupCleanupError()
+                try:
+                    saver = await checkpoint_scope.enter_async_context(
+                        open_checkpoint_saver(engine)
+                    )
+                    runtime = replace(runtime, session_graph_cache=SessionChatGraphCache(saver))
+                except Exception:  # noqa: BLE001 -- do not expose connection credentials at startup.
+                    raise StartupCleanupError() from None
             application.state.runtime = runtime
             memory_config = (
                 memory_settings if memory_settings is not None else MemorySettings.from_sources()
@@ -109,8 +124,11 @@ def create_app(
             finally:
                 if hasattr(application.state, "runtime"):
                     del application.state.runtime
-                if entered:
-                    await complete_in_thread(lambda: scope.__exit__(None, None, None))
+                try:
+                    await complete_before_cancelling(checkpoint_scope.aclose())
+                finally:
+                    if entered:
+                        await complete_in_thread(lambda: scope.__exit__(None, None, None))
 
     application = FastAPI(title="AI Teaching Assistant", lifespan=lifespan)
     application.add_middleware(RequestContextMiddleware)

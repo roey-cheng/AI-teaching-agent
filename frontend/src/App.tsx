@@ -7,6 +7,7 @@ import { Icon } from './components/Icons'
 import { MemoryDrawer } from './components/MemoryDrawer'
 import { Sidebar } from './components/Sidebar'
 import { useLanguage } from './i18n'
+import { applyGenerationEvent } from './liveGeneration'
 import type { ChatSession, LiveGeneration, MessageHistory, StreamEvent, User, UserMessage } from './types'
 
 type AuthState =
@@ -132,28 +133,12 @@ export default function App() {
     if (event.type === 'agent_progress' && event.data.stage === 'memory_unavailable') {
       setToast(t('memoryUnavailable'))
     }
-    setLive((current) => {
-      if (!current) return current
-      switch (event.type) {
-        case 'model_step': return {
-          ...current,
-          answer: event.data.phase === 'final' ? current.answer : '',
-          toolSteps: event.data.phase === 'tool' && current.answer
-            ? [...(current.toolSteps ?? []), current.answer] : current.toolSteps,
-        }
-        case 'message_start': return { ...current, attemptId: event.data.attempt_id }
-        case 'agent_progress': return { ...current, attemptId: event.data.attempt_id, stage: event.data.stage }
-        case 'reasoning_delta': return { ...current, attemptId: event.data.attempt_id, reasoning: current.reasoning + event.data.text }
-        case 'message_delta': return { ...current, attemptId: event.data.attempt_id, answer: current.answer + event.data.text }
-        case 'message_done': return { ...current, attemptId: event.data.attempt_id, stage: 'saving' }
-        case 'message_error': return { ...current, attemptId: event.data.attempt_id, error: event.data.error }
-      }
-    })
+    setLive((current) => current ? applyGenerationEvent(current, event) : current)
   }
 
   async function runGeneration(sessionId: string, mode: 'send' | 'retry', content: string, path: string, body: unknown) {
     let terminalEvent = false
-    setLive({ sessionId, mode, userContent: content, attemptId: null, stage: null, reasoning: '', answer: '', error: null })
+    setLive({ sessionId, mode, userContent: content, attemptId: null, stage: null, completionStatus: null, reasoning: '', answer: '', error: null })
     try {
       const duplicate = await streamChat(path, body, (event) => {
         if (event.type === 'message_done' || event.type === 'message_error') terminalEvent = true
@@ -163,6 +148,8 @@ export default function App() {
     } catch (error) {
       setToast(userFacingError(error, language))
     } finally {
+      setLive((current) => current?.completionStatus === 'saved'
+        ? { ...current, completionStatus: 'syncing_history' } : current)
       try {
         await Promise.all([refreshHistory(sessionId), refreshSessions(sessionId)])
       } catch (error) {

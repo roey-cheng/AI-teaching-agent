@@ -13,4 +13,4 @@ __all__ = ["PROFILE_MEMORY_PATH", "snapshot_backend"]
 def snapshot_backend(
     profile_text: str, *, user_id: int = 1, skill_text: str | None = None
 ) -> StoreBackend:
-    return ProfileStore.snapshot(user_id, profile_text, skill_text=skill_text).backend()
+    return ProfileStore.read_only_snapshot(user_id, profile_text, skill_text=skill_text).backend()

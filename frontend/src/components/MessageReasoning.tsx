@@ -63,7 +63,7 @@ function ReasoningCard({ sessionId, messageId }: Props) {
         {data?.available && <>
           <p className="reasoning-notice">{t('reasoningNotice')}</p>
           {data.steps.map((step) => <section key={step.step}>
-            <h4>{t('reasoningStep')} {step.step}</h4>
+            <h4>{t('reasoningSegment')} {step.step}</h4>
             <div>{step.text}</div>
           </section>)}
         </>}

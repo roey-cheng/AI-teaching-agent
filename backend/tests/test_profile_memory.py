@@ -84,6 +84,7 @@ class ProfileMemorySaveTest(unittest.TestCase):
             generation_status="RUNNING",
         )
         self.session.scalar.side_effect = [self.chat, self.question, None]
+        self.session.get.return_value = None
         self.session.scalars.return_value.all.return_value = [row()]
         self.facts = [ProfileFact(memory_key="preference.language", summary="喜欢中文")]
 
@@ -105,9 +106,15 @@ class ProfileMemorySaveTest(unittest.TestCase):
         self.assertNotIn("memory_id", updates)
         self.assertEqual(statement.params["user_id_m0"], 1)
         self.assertEqual(statement.params["memory_type_m0"], "LEARNING_PREFERENCE")
-        self.assertEqual(result.items[0].memory_id, "7")
-        self.assertNotIn("user_id", result.model_dump_json())
-        self.assertNotIn("memory_key", result.model_dump_json())
+        self.assertEqual(result.response.items[0].memory_id, "7")
+        self.assertNotIn("user_id", result.response.model_dump_json())
+        self.assertNotIn("memory_key", result.response.model_dump_json())
+        self.assertFalse(result.replayed)
+        self.assertEqual(result.current_facts, {"preference.language": "喜欢中文"})
+        receipt = self.session.add.call_args.args[0]
+        self.assertEqual(receipt.question_id, 10)
+        self.assertEqual(receipt.user_id, 1)
+        self.assertEqual(receipt.facts, [fact.model_dump() for fact in self.facts])
         self.factory.begin.return_value.__exit__.assert_called_once_with(None, None, None)
         with self.registry.locked(1) as slot:
             self.assertEqual(slot.attempt_id, self.accepted.attempt_id)
@@ -132,7 +139,8 @@ class ProfileMemorySaveTest(unittest.TestCase):
 
     def test_mismatched_snapshot_session_rejected(self):
         bad = replace(
-            self.accepted, prepared_input=replace(self.accepted.prepared_input, session_id="2")
+            self.accepted,
+            admission_snapshot=replace(self.accepted.admission_snapshot, session_id="2"),
         )
         with self.assertRaises(StaleGenerationError):
             self.save(accepted=bad)

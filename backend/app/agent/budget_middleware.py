@@ -1,4 +1,4 @@
-"""加载只读记忆后检查完整模型输入；当前阶段不允许任何模型工具调用。"""
+"""加载只读画像后检查完整模型请求预算；基础类禁用工具，教学子类另行开放。"""
 
 import json
 
@@ -44,16 +44,19 @@ class AgentToolUseNotAllowedError(Exception):
         super().__init__("Tool execution is not enabled for this chat agent.")
 
 
-class NoAutomaticSummary(AgentMiddleware):
-    """利用 Deep Agents 的同名 middleware 替换机制，关闭主 Agent 自动摘要。"""
+class DisableSummarizationMiddleware(AgentMiddleware):
+    """Only for bounded, one-shot background extraction; never the chat graph."""
 
     @property
     def name(self) -> str:
         return "SummarizationMiddleware"
 
 
-class ChatMemoryBudgetMiddleware(MemoryMiddleware):
-    """替换框架的记忆中间件，在它已加入记忆之后检查预算，防止检查顺序漏算。"""
+class ProfilePromptBudgetMiddleware(MemoryMiddleware):
+    """复用在图上的画像加载与请求预算规则，不保存某次调用的用户资料。
+
+    先由框架注入本次画像，再检查完整请求预算，而不只是画像本身的大小。
+    """
 
     @property
     def name(self) -> str:
@@ -82,12 +85,12 @@ class ChatMemoryBudgetMiddleware(MemoryMiddleware):
 
     def _claim_context(self, runtime):
         if self.run_scoped:
-            from app.agent.run_context import require_run_context
+            from app.agent.run_context import require_chat_run_dependencies
 
-            context = require_run_context(runtime)
-            if context.prepared.policy != self.policy:
+            dependencies = require_chat_run_dependencies(runtime)
+            if dependencies.admission_snapshot.policy != self.policy:
                 raise ValueError("Run input policy does not match the compiled graph")
-            context.claim()
+            dependencies.claim()
 
     def before_agent(self, state: MemoryState, runtime, config):
         self._claim_context(runtime)

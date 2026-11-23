@@ -26,13 +26,13 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('saved model reasoning', () => {
-  it('starts collapsed, fetches on demand and safely renders separate plain-text steps', async () => {
+  it('starts collapsed, fetches on demand and safely renders separate plain-text segments', async () => {
     const { container } = render(card())
     expect(screen.getByRole('button').getAttribute('aria-expanded')).toBe('false')
     expect(query).not.toHaveBeenCalled()
     toggle()
     expect(await screen.findByText('first thought')).toBeTruthy()
-    expect(screen.getByText('思考步骤 2')).toBeTruthy()
+    expect(screen.getByText('推理片段 2')).toBeTruthy()
     expect(container.textContent).toContain('<script>alert(1)</script>')
     expect(container.querySelector('script')).toBeNull()
     expect(query).toHaveBeenCalledWith('10', '2', expect.any(AbortSignal))
@@ -112,6 +112,6 @@ describe('saved model reasoning', () => {
     window.localStorage.setItem('mentor-language', 'en')
     render(card())
     fireEvent.click(screen.getByRole('button', { name: 'View model reasoning' }))
-    expect(await screen.findByText('Reasoning step 1')).toBeTruthy()
+    expect(await screen.findByText('Reasoning segment 1')).toBeTruthy()
   })
 })

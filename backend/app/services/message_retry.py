@@ -19,7 +19,7 @@ from app.schemas import (
     UserResponse,
 )
 from app.schemas._validation import format_database_id
-from app.services.agent_input import prepare_agent_input
+from app.services.agent_input import prepare_chat_admission
 from app.services.errors import (
     MessageNotFoundError,
     MessageSendUnavailableError,
@@ -139,7 +139,7 @@ def accept_failed_message_retry(
                 original = SendMessageRequest.model_validate(
                     {"client_message_key": question.client_message_key, "content": question.content}
                 )
-                prepared = prepare_agent_input(
+                prepared = prepare_chat_admission(
                     session,
                     current_user,
                     str(chat_id),

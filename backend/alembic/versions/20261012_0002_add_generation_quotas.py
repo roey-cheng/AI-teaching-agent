@@ -18,9 +18,7 @@ depends_on: str | None = None
 def upgrade() -> None:
     op.create_table(
         "generation_control",
-        sa.Column(
-            "control_id", mysql.TINYINT(unsigned=True), autoincrement=False, nullable=False
-        ),
+        sa.Column("control_id", mysql.TINYINT(unsigned=True), autoincrement=False, nullable=False),
         sa.PrimaryKeyConstraint("control_id"),
         sa.CheckConstraint("control_id = 1", name="ck_generation_control_singleton"),
         mysql_engine="InnoDB",

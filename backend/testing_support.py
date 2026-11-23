@@ -1,7 +1,9 @@
 """离线/临时 MySQL 测试的显式断言与运行环境，不读取 .env 或连接数据库。"""
 
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agent.factory import SessionChatGraphCache
 from app.core.config import GenerationQuotaSettings
 from app.core.runtime import BackendRuntime
 from app.services.generation_limit import GenerationRateLimiter
@@ -46,4 +48,5 @@ def make_runtime(
         quota if quota is not None else GenerationQuota(GenerationQuotaSettings()),
         database_guard if database_guard is not None else TestDatabaseGuard(),
         cleanup if cleanup is not None else StartupCleanupResult(),
+        SessionChatGraphCache(InMemorySaver()),
     )

@@ -3,8 +3,15 @@
 from app.models.agent_memory import AgentMemory
 from app.models.auth_session import AuthSession
 from app.models.chat_session import ChatSession
+from app.models.chat_thread import PublishedChatCheckpoint
 from app.models.generation_attempt import GenerationAttempt, GenerationControl
-from app.models.memory_runtime import AgentTurnRecord, MemoryJob, MemoryState, MemoryTopicRevision
+from app.models.memory_runtime import (
+    AgentTurnRecord,
+    MemoryConsolidationJob,
+    MemoryConsolidationState,
+    MemoryTopicRevision,
+)
+from app.models.memory_write_receipt import MemoryWriteReceipt
 from app.models.message import Message
 from app.models.user import User
 
@@ -15,9 +22,11 @@ __all__ = [
     "ChatSession",
     "GenerationAttempt",
     "GenerationControl",
-    "MemoryJob",
-    "MemoryState",
+    "MemoryConsolidationJob",
+    "MemoryConsolidationState",
     "MemoryTopicRevision",
+    "MemoryWriteReceipt",
     "Message",
+    "PublishedChatCheckpoint",
     "User",
 ]

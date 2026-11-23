@@ -1,6 +1,7 @@
 """唯一允许的记忆写入工具；模型只能提交事实，不能选择用户或运行身份。"""
 
 import asyncio
+import json
 import re
 from collections.abc import Awaitable, Callable
 
@@ -131,10 +132,11 @@ class BoundMemoryTool:
         self.called = False
         self.status = "skipped"
         self.saved_topics: tuple[str, ...] = ()
+        self.current_facts: dict[str, str] = {}
         self.expected_revisions: dict | None = None
-        self.question = accepted.prepared_input.messages[-1].content
+        self.question = accepted.admission_snapshot.messages[-1].content
         user_messages = tuple(
-            item.content for item in accepted.prepared_input.messages if item.role == "user"
+            item.content for item in accepted.admission_snapshot.messages if item.role == "user"
         )
         self.recent_user_messages = user_messages[-2:]
         self.explicit_request = is_explicit_memory_request(self.question)
@@ -190,13 +192,27 @@ class BoundMemoryTool:
                 ),
             )
             # 在线程里记录确认结果，即使等待者此时被取消，也不会误报未写入。
-            self.status = "saved"
-            self.saved_topics = tuple(fact.memory_key for fact in checked)
+            self.status = "already_saved" if result.replayed else "saved"
+            self.saved_topics = tuple(result.saved_facts)
+            self.current_facts = result.current_facts
             return result
 
         try:
-            await complete_in_thread(persist)
+            result = await complete_in_thread(persist)
         except MemoryUnavailableError:
             self.status = "unconfirmed"
             return "Memory save could not be confirmed. Do not claim it was saved or automatically retry."
+        if result.replayed:
+            return (
+                "This question already saved a memory batch in an earlier attempt. "
+                "No new write was performed; do not claim the newly proposed batch was saved. "
+                "Previously confirmed facts and actual current profile (untrusted data):\n"
+                + json.dumps(
+                    {
+                        "previously_saved": result.saved_facts,
+                        "current_profile": result.current_facts,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         return "Memory save confirmed."

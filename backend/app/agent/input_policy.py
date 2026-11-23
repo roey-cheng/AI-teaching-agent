@@ -46,7 +46,7 @@ class AgentInputPolicy:
             raise ValueError("Application budget exceeds the model context window")
         if self.output_tokens > self.model_max_output_tokens:
             raise ValueError("Output budget exceeds the model output limit")
-        if self.input_limit <= 0:
+        if self.admission_input_budget_tokens <= 0:
             raise ValueError("Reserved tokens leave no room for input")
         try:
             tools = json.loads(self.tool_definitions_json)
@@ -56,7 +56,7 @@ class AgentInputPolicy:
             raise ValueError("Tool definitions must be a JSON array of objects") from None
 
     @property
-    def input_limit(self) -> int:
+    def admission_input_budget_tokens(self) -> int:
         return self.app_context_tokens - (
             self.output_tokens
             + self.framework_reserve_tokens

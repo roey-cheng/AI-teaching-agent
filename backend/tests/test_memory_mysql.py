@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from alembic.config import Config
 from langchain_core.messages import ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langsmith import tracing_context
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
@@ -18,7 +19,7 @@ from test_memory_orchestrator import MemoryModel, answer
 
 from alembic import command
 from app.agent.consolidation import ConsolidatedFact
-from app.agent.factory import ChatAgentProvider
+from app.agent.factory import SessionChatGraphCache
 from app.agent.input_policy import policy_for_model
 from app.agent.profile_store import PROFILE_MEMORY_PATH, ProfileStore, topic_path
 from app.core.config import GenerationQuotaSettings, MemorySettings, TracingSettings
@@ -26,8 +27,8 @@ from app.models import (
     AgentMemory,
     AgentTurnRecord,
     ChatSession,
-    MemoryJob,
-    MemoryState,
+    MemoryConsolidationJob,
+    MemoryConsolidationState,
     MemoryTopicRevision,
     Message,
     User,
@@ -43,8 +44,8 @@ from app.services.memory_tasks import (
     claim_memory_job,
     fail_memory_job,
     finish_memory_job,
+    record_consolidation_activity,
     recover_memory_jobs,
-    touch_memory,
     utcnow,
 )
 from testing_support import require_value
@@ -236,9 +237,11 @@ class MemoryMySQLTest(unittest.TestCase):
     def setUp(self):
         # Tests leave rows for inspection. Finish/disable previous test jobs under the test-only DB.
         with self.factory.begin() as session:
-            for state in session.scalars(select(MemoryState)):
+            for state in session.scalars(select(MemoryConsolidationState)):
                 state.dirty = False
-            for job in session.scalars(select(MemoryJob).where(MemoryJob.status == "RUNNING")):
+            for job in session.scalars(
+                select(MemoryConsolidationJob).where(MemoryConsolidationJob.status == "RUNNING")
+            ):
                 job.status, job.finished_at = "FAILED", utcnow()
             self.user = self.make_user(session)
             self.chat = self.make_chat(session, self.user.user_id)
@@ -269,7 +272,7 @@ class MemoryMySQLTest(unittest.TestCase):
     def enqueue(self, content="我喜欢中文解释"):
         with self.factory.begin() as session:
             q = self.make_question(session, self.chat.chat_session_id, content)
-            touch_memory(
+            record_consolidation_activity(
                 session,
                 self.user.user_id,
                 utcnow() - timedelta(minutes=20),
@@ -291,7 +294,7 @@ class MemoryMySQLTest(unittest.TestCase):
 
     def test_migration_does_not_queue_old_history(self):
         with self.factory() as session:
-            state = require_value(session.get(MemoryState, self.legacy_user_id))
+            state = require_value(session.get(MemoryConsolidationState, self.legacy_user_id))
             self.assertGreaterEqual(state.cursor, self.legacy_message_id)
             self.assertEqual(state.pending_ids, [])
             self.assertFalse(state.dirty)
@@ -307,7 +310,7 @@ class MemoryMySQLTest(unittest.TestCase):
             ).all()
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].summary, "喜欢中文解释")
-            state = require_value(session.get(MemoryState, self.user.user_id))
+            state = require_value(session.get(MemoryConsolidationState, self.user.user_id))
             self.assertEqual(state.pending_ids, [])
             self.assertFalse(state.dirty)
 
@@ -326,7 +329,8 @@ class MemoryMySQLTest(unittest.TestCase):
             finish_memory_job(self.factory, job, [self.candidate(mid)])
         with self.factory() as session:
             self.assertIn(
-                mid, require_value(session.get(MemoryState, self.user.user_id)).pending_ids
+                mid,
+                require_value(session.get(MemoryConsolidationState, self.user.user_id)).pending_ids,
             )
 
     def test_exact_source_and_privacy_validation(self):
@@ -343,11 +347,11 @@ class MemoryMySQLTest(unittest.TestCase):
     def test_new_activity_and_active_generation_defer(self):
         self.enqueue()
         with self.factory.begin() as session:
-            state = require_value(session.get(MemoryState, self.user.user_id))
+            state = require_value(session.get(MemoryConsolidationState, self.user.user_id))
             state.last_activity_at = utcnow()
         self.assertIsNone(self.claim())
         with self.factory.begin() as session:
-            state = require_value(session.get(MemoryState, self.user.user_id))
+            state = require_value(session.get(MemoryConsolidationState, self.user.user_id))
             state.last_activity_at = utcnow() - timedelta(minutes=20)
             running = self.make_question(session, self.chat.chat_session_id, "new", "RUNNING")
             running.created_at = utcnow()
@@ -371,10 +375,12 @@ class MemoryMySQLTest(unittest.TestCase):
         fail_memory_job(self.factory, third.job_id, now=now + timedelta(minutes=8))
         self.assertIsNone(self.claim(now=now + timedelta(minutes=20)))
         with self.factory() as session:
-            state = require_value(session.get(MemoryState, self.user.user_id))
+            state = require_value(session.get(MemoryConsolidationState, self.user.user_id))
             self.assertTrue(state.paused)
             self.assertIn(mid, state.pending_ids)
-            self.assertEqual(require_value(session.get(MemoryJob, first.job_id)).status, "FAILED")
+            self.assertEqual(
+                require_value(session.get(MemoryConsolidationJob, first.job_id)).status, "FAILED"
+            )
 
     def test_user_quota_counts_failed_calls(self):
         self.enqueue()
@@ -390,7 +396,8 @@ class MemoryMySQLTest(unittest.TestCase):
         finish_memory_job(self.factory, job, [self.candidate(first)])
         with self.factory() as session:
             self.assertEqual(
-                require_value(session.get(MemoryState, self.user.user_id)).pending_ids, [second]
+                require_value(session.get(MemoryConsolidationState, self.user.user_id)).pending_ids,
+                [second],
             )
 
     def test_running_background_job_reserves_foreground_capacity(self):
@@ -431,7 +438,9 @@ class MemoryMySQLTest(unittest.TestCase):
         retry = require_value(self.claim(now=utcnow() + timedelta(minutes=2)))
         finish_memory_job(self.factory, retry, [self.candidate(mid)])
         with self.factory() as session:
-            self.assertFalse(require_value(session.get(MemoryState, self.user.user_id)).dirty)
+            self.assertFalse(
+                require_value(session.get(MemoryConsolidationState, self.user.user_id)).dirty
+            )
             self.assertIsNone(
                 session.scalar(select(AgentMemory).where(AgentMemory.user_id == self.user.user_id))
             )
@@ -440,10 +449,14 @@ class MemoryMySQLTest(unittest.TestCase):
         mid = self.enqueue("中" * 9000)
         self.assertIsNone(self.claim())
         with self.factory() as session:
-            state = require_value(session.get(MemoryState, self.user.user_id))
+            state = require_value(session.get(MemoryConsolidationState, self.user.user_id))
             self.assertTrue(state.paused)
             self.assertEqual(state.pending_ids, [mid])
-            job = session.scalar(select(MemoryJob).where(MemoryJob.user_id == self.user.user_id))
+            job = session.scalar(
+                select(MemoryConsolidationJob).where(
+                    MemoryConsolidationJob.user_id == self.user.user_id
+                )
+            )
             assert job is not None
             self.assertEqual(job.error_code, "MEMORY_SOURCE_TOO_LARGE")
 
@@ -452,7 +465,7 @@ class MemoryMySQLTest(unittest.TestCase):
             other_chat_id = str(self.make_chat(session, self.user.user_id).chat_session_id)
 
         async def run():
-            provider = ChatAgentProvider()
+            provider = SessionChatGraphCache(InMemorySaver())
             registry = GenerationRegistry()
             models = [
                 MemoryModel(responses=[answer("A answer one"), answer("A answer two")]),
@@ -466,7 +479,7 @@ class MemoryMySQLTest(unittest.TestCase):
             with (
                 tracing_context(enabled=False),
                 patch(
-                    "app.agent.deepseek_protocol.ProtocolChatDeepSeek", side_effect=models
+                    "app.agent.deepseek_protocol.ReasoningReplayChatDeepSeek", side_effect=models
                 ) as constructor,
             ):
                 for chat_id, content in [
@@ -487,7 +500,7 @@ class MemoryMySQLTest(unittest.TestCase):
                         input_policy=policy_for_model("deepseek-v4-pro"),
                         check_new_message=lambda _: None,
                         on_event=emit,
-                        agent_provider=provider,
+                        session_graph_cache=provider,
                     )
                     from app.schemas import MessageDoneData
 
@@ -517,7 +530,7 @@ class MemoryMySQLTest(unittest.TestCase):
                 ]
             )
             registry = GenerationRegistry()
-            provider = ChatAgentProvider()
+            provider = SessionChatGraphCache(InMemorySaver())
             quota = GenerationQuota(GenerationQuotaSettings.from_sources(_env_file=None))
             events = []
 
@@ -528,7 +541,7 @@ class MemoryMySQLTest(unittest.TestCase):
             with (
                 tracing_context(enabled=False),
                 patch(
-                    "app.agent.deepseek_protocol.ProtocolChatDeepSeek", return_value=model
+                    "app.agent.deepseek_protocol.ReasoningReplayChatDeepSeek", return_value=model
                 ) as constructor,
             ):
                 for text in ("请记住我热爱学习", "what do you remember?"):
@@ -546,7 +559,7 @@ class MemoryMySQLTest(unittest.TestCase):
                         check_new_message=lambda _: None,
                         on_event=emit,
                         quota=quota,
-                        agent_provider=provider,
+                        session_graph_cache=provider,
                     )
                     from app.schemas import MessageDoneData
 
@@ -605,7 +618,12 @@ class MemoryMySQLTest(unittest.TestCase):
                 )
                 self.assertEqual(require_value(saved).summary, "热爱学习")
                 self.assertEqual(
-                    len(require_value(session.get(MemoryState, self.user.user_id)).pending_ids), 2
+                    len(
+                        require_value(
+                            session.get(MemoryConsolidationState, self.user.user_id)
+                        ).pending_ids
+                    ),
+                    2,
                 )
 
         asyncio.run(run())

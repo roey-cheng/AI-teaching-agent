@@ -55,7 +55,7 @@ class StoreMemoryBackendTest(unittest.TestCase):
         )
 
     def test_scoped_store_has_no_host_or_sandbox_access(self):
-        store = ProfileStore.snapshot(2, "other user")
+        store = ProfileStore.read_only_snapshot(2, "other user")
         self.assertIsNone(store.get(("users", "1", "profile"), PROFILE_MEMORY_PATH))
         self.assertEqual(store.search(("users", "1")), [])
         self.assertNotIn("other user", repr(store))

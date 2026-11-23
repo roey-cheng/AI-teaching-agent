@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_deepseek import ChatDeepSeek
 
-from app.agent.budget_middleware import AgentToolUseNotAllowedError, NoAutomaticSummary
+from app.agent.budget_middleware import AgentToolUseNotAllowedError, DisableSummarizationMiddleware
 from app.agent.input_policy import estimate_message_tokens, estimate_text_tokens
 from app.agent.memory_backend import snapshot_backend
 from app.agent.output import managed_agent_stream
@@ -106,7 +106,7 @@ def build_memory_agent(settings, prepared, bound):
         extra_body={"thinking": {"type": "disabled"}},
     )
     middleware: list[AgentMiddleware[Any, None]] = [
-        NoAutomaticSummary(),
+        DisableSummarizationMiddleware(),
         ModelCallLimitMiddleware(run_limit=1, exit_behavior="error"),
         MemoryToolOnlyMiddleware(bound.tool, prepared.policy),
     ]
@@ -131,6 +131,13 @@ def with_memory_result(prepared, profile, status, topics=()):
             "Backend confirmed saving or updating these memory topics this turn: "
             + ", ".join(topics)
             + ". Tell the user the update succeeded."
+        )
+    elif status == "already_saved":
+        note = (
+            "An earlier attempt of this same question already saved these memory topics: "
+            + ", ".join(topics)
+            + ". This attempt did not apply another write. Use the current profile, which may "
+            "have changed since then. Do not claim the newly proposed batch was saved."
         )
     elif status == "unconfirmed":
         note = (
@@ -170,25 +177,25 @@ def with_memory_result(prepared, profile, status, topics=()):
         )
 
     trimmed = False
-    while size() > policy.input_limit and len(messages) > 1:
+    while size() > policy.admission_input_budget_tokens and len(messages) > 1:
         del messages[:2]
         trimmed = True
-    if size() > policy.input_limit:
+    if size() > policy.admission_input_budget_tokens:
         raise ContextTooLargeError()
     return replace(
         prepared,
         policy=policy,
         profile_memory=profile,
         messages=tuple(messages),
-        estimated_input_tokens=size(),
-        history_rounds=(len(messages) - 1) // 2,
-        history_truncated=prepared.history_truncated or trimmed,
+        estimated_local_input_tokens=size(),
+        included_history_turns=(len(messages) - 1) // 2,
+        input_history_trimmed=prepared.input_history_trimmed or trimmed,
     )
 
 
 async def prepare_memory_for_turn(accepted, factory, registry, settings, progress):
     """最多一次记忆模型请求/一次批量写入；失败不盲目重试，不阻止正常聊天。"""
-    prepared = accepted.prepared_input
+    prepared = accepted.admission_snapshot
     bound = BoundMemoryTool(accepted, factory, registry, progress)
     profile = prepared.profile_memory
     await progress("memory_checking")
@@ -253,11 +260,11 @@ async def prepare_memory_for_turn(accepted, factory, registry, settings, progres
 
         if isinstance(error, EventDeliveryError):
             raise
-        if bound.status != "saved":
+        if bound.status not in {"saved", "already_saved"}:
             bound.status = "unconfirmed"
     finally:
         bound.close()
-    if bound.status == "saved":
+    if bound.status in {"saved", "already_saved"}:
         try:
 
             def reload_profile():
@@ -270,7 +277,7 @@ async def prepare_memory_for_turn(accepted, factory, registry, settings, progres
             pass
     await progress(
         "memory_saved"
-        if bound.status == "saved"
+        if bound.status in {"saved", "already_saved"}
         else "memory_unavailable"
         if bound.status == "unconfirmed"
         else "memory_skipped"

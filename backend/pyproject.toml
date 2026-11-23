@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.141.1,<0.142",
     "httpx>=0.28.1,<0.29",
     "langchain-deepseek>=1,<2",
+    "langgraph-checkpoint-mysql[asyncmy,pymysql]==3.0.0",
     "langsmith>=0.14.11,<0.15",
     "pydantic-settings>=2.15.0,<3",
     "pydantic[email]>=2.13.5,<3",

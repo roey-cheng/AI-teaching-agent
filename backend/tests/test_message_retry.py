@@ -55,7 +55,7 @@ class MessageRetryTest(unittest.TestCase):
         self.registry, self.check = GenerationRegistry(), MagicMock()
         self.policy = policy_for_model("deepseek-v4-pro")
         prepare_patch = patch(
-            "app.services.message_retry.prepare_agent_input", return_value=prepared()
+            "app.services.message_retry.prepare_chat_admission", return_value=prepared()
         )
         self.prepare = prepare_patch.start()
         self.addCleanup(prepare_patch.stop)
@@ -215,8 +215,8 @@ class RetryExecutionTest(unittest.IsolatedAsyncioTestCase):
             patch(
                 "app.services.chat_execution.accept_failed_message_retry", side_effect=accept
             ) as admission,
-            patch("app.services.chat_execution.build_chat_agent") as model,
-            patch("app.services.chat_execution.TurnMemory") as memory,
+            patch("app.services.chat_execution.SessionChatGraphCache.get") as model,
+            patch("app.services.chat_execution.ChatAttemptState") as memory,
         ):
             callback = MagicMock()
             request = RetryMessageRequest.model_validate({"failed_attempt_id": str(uuid4())})

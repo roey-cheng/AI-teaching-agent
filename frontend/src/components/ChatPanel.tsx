@@ -40,6 +40,9 @@ export function ChatPanel({ session, history, historyLoading, live, onMenu, onSe
   const bottomRef = useRef<HTMLDivElement>(null)
   const busy = Boolean(live) || Boolean(history?.is_generating)
   const hasMessages = Boolean(history?.items.length)
+  const completionLabel = live?.completionStatus
+    ? t(live.completionStatus === 'saved' ? 'conversationSaved' : 'syncingSavedHistory')
+    : null
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: live ? 'smooth' : 'auto' })
@@ -135,7 +138,8 @@ export function ChatPanel({ session, history, historyLoading, live, onMenu, onSe
           <div className="message-row assistant-row live-row">
             <span className="assistant-avatar"><Icon name="sparkle" /></span>
             <div className="live-content">
-              <div className="agent-status"><span className="pulse-dot" />{live.stage ? t(stageLabelKeys[live.stage]) : t('receiving')}</div>
+              <div className="agent-status"><span className="pulse-dot" />{completionLabel
+                ?? (live.stage ? t(stageLabelKeys[live.stage]) : t('receiving'))}</div>
               {live.reasoning && (
                 <div className="thinking-card">
                   <button aria-expanded={thinkingOpen} onClick={() => setThinkingOpen((open) => !open)} type="button">
@@ -144,11 +148,11 @@ export function ChatPanel({ session, history, historyLoading, live, onMenu, onSe
                   {thinkingOpen && <div className="thinking-text">{live.reasoning}</div>}
                 </div>
               )}
-              {!!live.toolSteps?.length && <details className="thinking-card">
-                <summary>{language === 'zh' ? '处理步骤' : 'Processing steps'}</summary>
-                {live.toolSteps.map((step, index) => <div key={index}><Markdown>{step}</Markdown></div>)}
+              {!!live.intermediateAssistantMessages?.length && <details className="thinking-card">
+                <summary>{t('intermediateAssistantMessages')}</summary>
+                {live.intermediateAssistantMessages.map((message, index) => <div key={index}><Markdown>{message}</Markdown></div>)}
               </details>}
-              {live.answer ? <div className="assistant-message"><Markdown>{live.answer}</Markdown><span className="stream-caret" /></div> : !live.error && <div className="answer-placeholder"><i /><i /><i /></div>}
+              {live.answer ? <div className="assistant-message"><Markdown>{live.answer}</Markdown>{!live.completionStatus && <span className="stream-caret" />}</div> : !live.error && <div className="answer-placeholder"><i /><i /><i /></div>}
               {live.error && <div className="stream-error">{friendlyErrorMessage(live.error.code, live.error.message, language)}</div>}
             </div>
           </div>
@@ -164,7 +168,7 @@ export function ChatPanel({ session, history, historyLoading, live, onMenu, onSe
             maxLength={20000}
             onChange={(event) => { setContent(event.target.value); resizeTextarea() }}
             onKeyDown={keyDown}
-            placeholder={busy ? t('generating') : t('sendPlaceholder')}
+            placeholder={completionLabel ?? (busy ? t('generating') : t('sendPlaceholder'))}
             ref={textareaRef}
             rows={1}
             value={content}

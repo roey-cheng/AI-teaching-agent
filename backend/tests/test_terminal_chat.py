@@ -3,17 +3,23 @@
 import asyncio
 import io
 import unittest
+from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import SecretStr
+from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 
+from app.agent.factory import SessionChatGraphCache
 from app.cli.chat import DatabaseNotReadyError, authenticate, check_database_ready, launch, run_chat
 from app.cli.terminal import EventPrinter, Terminal, terminal_text
 from app.core.config import DatabaseSettings, ModelSettings, TracingSettings
+from app.db.base import Base
 from app.schemas import (
     AgentProgressData,
     AssistantMessageResponse,
@@ -162,8 +168,40 @@ class ChatLoopTest(unittest.TestCase):
 
     def run_lines(self, lines):
         terminal = ScriptTerminal(lines)
-        code = run_chat(terminal, "factory", model(), tracing())
+        code = run_chat(
+            terminal,
+            "factory",
+            model(),
+            tracing(),
+            session_graph_cache=SessionChatGraphCache(InMemorySaver()),
+        )
         return code, terminal.buffer.getvalue()
+
+    def test_native_pool_closes_on_its_runner_before_event_loop_closes(self):
+        loops, events = [], []
+
+        @asynccontextmanager
+        async def saver_scope(engine):
+            loops.append(asyncio.get_running_loop())
+            events.append("opened")
+            try:
+                yield InMemorySaver()
+            finally:
+                loops.append(asyncio.get_running_loop())
+                events.append("closed")
+
+        engine = create_engine("mysql+pymysql://example:example@127.0.0.1/example")
+        try:
+            with patch("app.cli.chat.open_checkpoint_saver", saver_scope):
+                code = run_chat(
+                    ScriptTerminal(["/quit"]), sessionmaker(bind=engine), model(), tracing()
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(events, ["opened", "closed"])
+            self.assertIs(loops[0], loops[1])
+            self.assertTrue(loops[0].is_closed())
+        finally:
+            engine.dispose()
 
     def test_blank_commands_history_new_and_quit_do_not_call_model(self):
         code, text = self.run_lines([" ", "/nope", "/help", "/history", "/new", "/quit"])
@@ -319,22 +357,14 @@ class TerminalStartupTest(unittest.TestCase):
         with (
             patch("app.db.readiness.MigrationContext") as context,
             patch("app.db.readiness.inspect") as inspector,
+            patch("app.db.readiness.check_checkpoint_schema") as checkpoints,
+            patch("app.db.readiness.ScriptDirectory") as scripts,
         ):
-            context.configure.return_value.get_current_heads.return_value = ("20261025_0004",)
-            inspector.return_value.get_table_names.return_value = [
-                "users",
-                "auth_sessions",
-                "chat_sessions",
-                "messages",
-                "agent_memory",
-                "agent_turn_records",
-                "memory_consolidation_state",
-                "memory_consolidation_jobs",
-                "memory_topic_revisions",
-                "generation_control",
-                "generation_attempts",
-            ]
+            scripts.from_config.return_value.get_heads.return_value = ["readiness-test-head"]
+            context.configure.return_value.get_current_heads.return_value = ("readiness-test-head",)
+            inspector.return_value.get_table_names.return_value = list(Base.metadata.tables)
             check_database_ready(engine)
+            checkpoints.assert_called_once_with(engine)
             context.configure.return_value.get_current_heads.return_value = ()
             with self.assertRaises(DatabaseNotReadyError):
                 check_database_ready(engine)
@@ -371,6 +401,7 @@ class TerminalStartupTest(unittest.TestCase):
                 ANY,
                 registry=runtime.registry,
                 limiter=runtime.limiter,
+                session_graph_cache=runtime.session_graph_cache,
             )
             scope.return_value.__exit__.assert_called_once()
         self.assertIn("2 interrupted, 1 restored successful", terminal.buffer.getvalue())

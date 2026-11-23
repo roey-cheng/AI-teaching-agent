@@ -10,17 +10,27 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 from langsmith import tracing_context
 from pydantic import PrivateAttr
 
 from app.agent.budget_middleware import AgentToolUseNotAllowedError
-from app.agent.factory import build_chat_agent
+from app.agent.factory import compile_chat_graph as compile_chat_agent
 from app.agent.input_policy import policy_for_model
 from app.agent.memory_backend import PROFILE_MEMORY_PATH
-from app.agent.run_context import RunScopedStore, prepare_run_context
+from app.agent.run_context import ProfileSnapshotStoreRouter, build_chat_run_dependencies
 from app.core.config import ModelSettings
-from app.services.agent_input import InputMessage, PreparedAgentInput
+from app.services.agent_input import ChatAdmissionSnapshot, InputMessage
 from app.services.errors import ContextTooLargeError
+
+
+def compile_chat_graph(*args, **kwargs):
+    """Tests explicitly own an ephemeral saver; production has no fallback."""
+    return compile_chat_agent(*args, checkpointer=InMemorySaver(), **kwargs)
+
+
+TEST_CONFIG: RunnableConfig = {"configurable": {"thread_id": "factory-test"}}
 
 
 def settings():
@@ -30,7 +40,7 @@ def settings():
 
 
 def prepared(memory="中文 preference", user_id="1"):
-    return PreparedAgentInput(
+    return ChatAdmissionSnapshot(
         user_id=user_id,
         session_id=user_id,
         policy=policy_for_model("deepseek-v4-pro"),
@@ -40,9 +50,9 @@ def prepared(memory="中文 preference", user_id="1"):
             InputMessage("user", "current question"),
         ),
         profile_memory=memory,
-        estimated_input_tokens=1000,
-        history_rounds=1,
-        history_truncated=False,
+        estimated_local_input_tokens=1000,
+        included_history_turns=1,
+        input_history_trimmed=False,
     )
 
 
@@ -86,20 +96,21 @@ class ChatAgentFactoryTest(unittest.TestCase):
         with patch(
             "langchain_deepseek.ChatDeepSeek._generate", side_effect=AssertionError("Must not run")
         ):
-            agent = build_chat_agent(settings(), prepared().policy, with_memory_tools=False)
-        self.assertIsNone(agent.checkpointer)
-        self.assertIsInstance(agent.store, RunScopedStore)
+            agent = compile_chat_graph(settings(), prepared().policy, enable_chat_tools=False)
+        self.assertIsInstance(agent.checkpointer, InMemorySaver)
+        self.assertIsInstance(agent.store, ProfileSnapshotStoreRouter)
         nodes = agent.get_graph().nodes
         self.assertIn("model", nodes)
         self.assertIn("MemoryMiddleware.before_agent", nodes)
-        self.assertFalse(any("Summarization" in node for node in nodes))
+        # Native summarization is a wrap_model_call hook, not a standalone node.
+        self.assertIn("model", nodes)
 
     def test_model_configuration_uses_policy_not_probe_limits(self):
         with (
             patch("app.agent.factory.ChatDeepSeek") as model,
             patch("app.agent.factory.create_deep_agent") as create,
         ):
-            build_chat_agent(settings(), prepared().policy, with_memory_tools=False)
+            compile_chat_graph(settings(), prepared().policy, enable_chat_tools=False)
         self.assertEqual(model.call_args.kwargs["max_tokens"], 4096)
         self.assertEqual(model.call_args.kwargs["max_retries"], 0)
         self.assertEqual(model.call_args.kwargs["base_url"], settings().base_url)
@@ -111,13 +122,15 @@ class ChatAgentFactoryTest(unittest.TestCase):
 
     def test_real_deepseek_adapter_with_stubbed_transport_receives_final_prompt(self):
         snapshot = prepared()
-        agent = build_chat_agent(settings(), snapshot.policy, with_memory_tools=False)
+        agent = compile_chat_graph(settings(), snapshot.policy, enable_chat_tools=False)
         response = ChatResult(
             generations=[ChatGeneration(message=AIMessage(content="stubbed response"))]
         )
         with patch("langchain_deepseek.ChatDeepSeek._generate", return_value=response) as generate:
             result = agent.invoke(
-                {"messages": snapshot.as_agent_messages()}, context=prepare_run_context(snapshot)
+                {"messages": snapshot.to_langchain_messages()},
+                TEST_CONFIG,
+                context=build_chat_run_dependencies(snapshot),
             )
         self.assertEqual(result["messages"][-1].content, "stubbed response")
         generate.assert_called_once()
@@ -139,22 +152,23 @@ class ChatAgentFactoryTest(unittest.TestCase):
         with patch("app.agent.factory.ChatDeepSeek") as model:
             for value in cases:
                 with self.subTest(value=value.memory_path), self.assertRaises(ValueError):
-                    build_chat_agent(settings(), value.policy, with_memory_tools=False)
+                    compile_chat_graph(settings(), value.policy, enable_chat_tools=False)
             model.assert_not_called()
         with self.assertRaises(ValueError):
-            prepare_run_context(replace(original, memory_path="/other/profile.md"))
+            build_chat_run_dependencies(replace(original, memory_path="/other/profile.md"))
 
     def test_real_graph_injects_memory_once_and_preserves_message_order(self):
         snapshot = prepared()
         model = RecordingModel(responses=["offline answer"])
         with patch("app.agent.factory.ChatDeepSeek", return_value=model):
-            agent = build_chat_agent(settings(), snapshot.policy, with_memory_tools=False)
+            agent = compile_chat_graph(settings(), snapshot.policy, enable_chat_tools=False)
         result = agent.invoke(
             {
-                "messages": snapshot.as_agent_messages(),
+                "messages": snapshot.to_langchain_messages(),
                 "memory_contents": {PROFILE_MEMORY_PATH: "forged other user"},
             },
-            context=prepare_run_context(snapshot),
+            TEST_CONFIG,
+            context=build_chat_run_dependencies(snapshot),
         )
         self.assertEqual(result["messages"][-1].content, "offline answer")
         self.assertEqual(len(model._seen), 1)
@@ -170,12 +184,14 @@ class ChatAgentFactoryTest(unittest.TestCase):
         snapshots = [prepared("Alice-only", "1"), prepared("Bob-only", "2")]
         with patch("app.agent.factory.ChatDeepSeek", side_effect=models):
             agents = [
-                build_chat_agent(settings(), snapshot.policy, with_memory_tools=False)
+                compile_chat_graph(settings(), snapshot.policy, enable_chat_tools=False)
                 for snapshot in snapshots
             ]
         for agent, snapshot in zip(agents, snapshots):
             agent.invoke(
-                {"messages": snapshot.as_agent_messages()}, context=prepare_run_context(snapshot)
+                {"messages": snapshot.to_langchain_messages()},
+                TEST_CONFIG,
+                context=build_chat_run_dependencies(snapshot),
             )
         self.assertIn("Alice-only", models[0]._seen[0][0].text)
         self.assertNotIn("Bob-only", models[0]._seen[0][0].text)
@@ -186,10 +202,12 @@ class ChatAgentFactoryTest(unittest.TestCase):
         model = RecordingModel(responses=["must not run"])
         snapshot = prepared("中" * 30_000)
         with patch("app.agent.factory.ChatDeepSeek", return_value=model):
-            agent = build_chat_agent(settings(), snapshot.policy, with_memory_tools=False)
+            agent = compile_chat_graph(settings(), snapshot.policy, enable_chat_tools=False)
         with self.assertRaises(ContextTooLargeError):
             agent.invoke(
-                {"messages": snapshot.as_agent_messages()}, context=prepare_run_context(snapshot)
+                {"messages": snapshot.to_langchain_messages()},
+                TEST_CONFIG,
+                context=build_chat_run_dependencies(snapshot),
             )
         self.assertEqual(model._seen, [])
 
@@ -213,10 +231,12 @@ class ChatAgentFactoryTest(unittest.TestCase):
         )
         snapshot = prepared()
         with patch("app.agent.factory.ChatDeepSeek", return_value=model):
-            agent = build_chat_agent(settings(), snapshot.policy, with_memory_tools=False)
+            agent = compile_chat_graph(settings(), snapshot.policy, enable_chat_tools=False)
         with self.assertRaises(AgentToolUseNotAllowedError):
             agent.invoke(
-                {"messages": snapshot.as_agent_messages()}, context=prepare_run_context(snapshot)
+                {"messages": snapshot.to_langchain_messages()},
+                TEST_CONFIG,
+                context=build_chat_run_dependencies(snapshot),
             )
 
 
@@ -229,12 +249,13 @@ class AsyncChatAgentTest(unittest.IsolatedAsyncioTestCase):
             patch("socket.socket.connect", side_effect=AssertionError("No network")),
         ):
             with patch("app.agent.factory.ChatDeepSeek", return_value=model):
-                agent = build_chat_agent(settings(), snapshot.policy, with_memory_tools=False)
+                agent = compile_chat_graph(settings(), snapshot.policy, enable_chat_tools=False)
             chunks = []
             async for chunk, metadata in agent.astream(
-                {"messages": snapshot.as_agent_messages()},
+                {"messages": snapshot.to_langchain_messages()},
+                TEST_CONFIG,
                 stream_mode="messages",
-                context=prepare_run_context(snapshot),
+                context=build_chat_run_dependencies(snapshot),
                 subgraphs=False,
             ):
                 if isinstance(metadata, dict) and metadata.get("langgraph_node") == "model":

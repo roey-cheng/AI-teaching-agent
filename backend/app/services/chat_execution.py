@@ -10,11 +10,11 @@ from langchain_core.messages import messages_to_dict
 from openai import APITimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.agent.factory import ChatAgentProvider, build_chat_agent
+from app.agent.factory import SessionChatGraphCache
 from app.agent.input_policy import AgentInputPolicy
-from app.agent.orchestrator import TurnMemory, validate_protocol
+from app.agent.orchestrator import ChatAttemptState, validate_protocol
 from app.agent.output import extract_visible_chunk, managed_agent_stream
-from app.agent.run_context import prepare_run_context
+from app.agent.run_context import build_chat_run_dependencies
 from app.agent.tracing import async_agent_tracing
 from app.core.async_work import complete_in_thread
 from app.core.config import ModelSettings, TracingSettings
@@ -32,6 +32,11 @@ from app.schemas import (
     UserResponse,
 )
 from app.schemas.stream import ModelStepData
+from app.services.chat_checkpoints import (
+    completed_checkpoint_id,
+    current_user_message,
+    prepare_checkpoint_run,
+)
 from app.services.generation_quota import GenerationQuota
 from app.services.generation_registry import GenerationRegistry
 from app.services.generation_result import settle_generation
@@ -70,7 +75,7 @@ async def execute_chat_turn(
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float = 200,
     quota: GenerationQuota | None = None,
-    agent_provider: ChatAgentProvider | None = None,
+    session_graph_cache: SessionChatGraphCache | None = None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """调用方先认证，传应用共享 registry 和真实限流检查。严禁作为匿名公开模型代理。
 
@@ -98,7 +103,7 @@ async def execute_chat_turn(
         on_event=on_event,
         timeout_seconds=timeout_seconds,
         quota=quota,
-        agent_provider=agent_provider,
+        session_graph_cache=session_graph_cache,
     )
 
 
@@ -117,7 +122,7 @@ async def execute_chat_retry(
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float = 120,
     quota: GenerationQuota | None = None,
-    agent_provider: ChatAgentProvider | None = None,
+    session_graph_cache: SessionChatGraphCache | None = None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """重试原问题；不是发送同样文字的新消息，也不是重新生成成功答案。
 
@@ -145,7 +150,7 @@ async def execute_chat_retry(
         on_event=on_event,
         timeout_seconds=timeout_seconds,
         quota=quota,
-        agent_provider=agent_provider,
+        session_graph_cache=session_graph_cache,
     )
 
 
@@ -160,7 +165,7 @@ async def _execute_with_scope(
     on_event: Callable[[ChatEvent], Awaitable[None]],
     timeout_seconds: float,
     quota: GenerationQuota | None,
-    agent_provider: ChatAgentProvider | None,
+    session_graph_cache: SessionChatGraphCache | None,
 ) -> MessageDoneData | MessageErrorData | DuplicateMessageResponse:
     """两种准入之后走同一条记忆→回答→保存→清理路径，避免维护两套生成逻辑。"""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -176,7 +181,7 @@ async def _execute_with_scope(
 
     # __enter__ 在线程中执行。即使取消发生在提交期间，也保留清理所需的进入结果。
     entered = False
-    turn = None
+    attempt_state = None
 
     def enter():
         nonlocal entered
@@ -207,38 +212,39 @@ async def _execute_with_scope(
                         }
                     )
                 )
-                await progress("context_ready")  # 准入已完成历史与用户记忆快照的读取。
+                # 事件名是已有 SSE 契约；这里只完成准入问题和画像准备，历史稍后由 checkpoint 恢复。
+                await progress("context_ready")
                 answer_parts = []
                 finish_reason = None
                 seen_reasoning = seen_answer = False
                 output_bytes = 0
                 step_bytes = 0
                 async with async_agent_tracing(tracing_settings):
-                    turn = TurnMemory(accepted, session_factory, registry, progress)
-                    prepared = await turn.prepare()
-                    context = prepare_run_context(prepared, turn)
+                    attempt_state = ChatAttemptState(accepted, session_factory, registry, progress)
+                    admission_snapshot = await attempt_state.load_profile_snapshot()
+                    run_dependencies = build_chat_run_dependencies(
+                        admission_snapshot, attempt_state
+                    )
                     # Select this conversation's graph only after admission has
                     # verified ownership; never share a graph across sessions.
-                    # Standalone callers may omit it for one-shot execution.
-                    agent = (
-                        agent_provider.get(
-                            model_settings,
-                            input_policy,
-                            user_id=accepted.prepared_input.user_id,
-                            session_id=accepted.session_id,
+                    if session_graph_cache is None:
+                        raise RuntimeError(
+                            "Chat execution requires a checkpoint-backed session graph cache"
                         )
-                        if agent_provider is not None
-                        else build_chat_agent(model_settings, input_policy)
+                    chat_graph = session_graph_cache.get(
+                        model_settings,
+                        input_policy,
+                        user_id=accepted.admission_snapshot.user_id,
+                        session_id=accepted.session_id,
                     )
+                    run_config = await prepare_checkpoint_run(chat_graph, accepted, session_factory)
                     await progress("agent_running")
-                    stream = agent.astream(
-                        {"messages": turn.input_messages},
-                        config={
-                            "run_name": "teaching_chat",
-                            "metadata": {"attempt_id": accepted.attempt_id},
-                        },
+                    stream = chat_graph.astream(
+                        {"messages": [current_user_message(accepted)]},
+                        config=run_config,
+                        durability="sync",
                         stream_mode=["messages", "custom"],
-                        context=context,
+                        context=run_dependencies,
                         subgraphs=False,
                     )
                     async with managed_agent_stream(stream):
@@ -265,6 +271,8 @@ async def _execute_with_scope(
                                 raise asyncio.CancelledError
                             if not isinstance(metadata, dict):
                                 raise TypeError("Invalid model stream metadata")
+                            if "teaching_context_summary" in metadata.get("tags", []):
+                                continue  # Internal compaction is not the user's answer/reasoning.
                             visible = extract_visible_chunk(chunk, metadata, allow_tools=True)
                             output_bytes += len(visible.reasoning.encode("utf-8")) + len(
                                 visible.answer.encode("utf-8")
@@ -306,13 +314,14 @@ async def _execute_with_scope(
                 answer = "".join(answer_parts)
                 if finish_reason != "stop" or not answer.strip():
                     raise ValueError("The model did not produce a complete answer")
-                validate_protocol(turn.protocol)
+                validate_protocol(attempt_state.protocol_messages)
                 if deadline.expired():
                     raise TimeoutError
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
                     raise asyncio.CancelledError
                 await progress("saving")
+                checkpoint_id = await completed_checkpoint_id(chat_graph, accepted)
 
                 def save_answer():
                     return settle_generation(
@@ -321,7 +330,9 @@ async def _execute_with_scope(
                         registry,
                         answer=answer,
                         quota=quota,
-                        protocol_messages=messages_to_dict(turn.protocol),
+                        protocol_messages=messages_to_dict(attempt_state.protocol_messages),
+                        checkpoint_id=checkpoint_id,
+                        checkpoint_parent_id=run_config.get("configurable", {})["checkpoint_id"],
                     )
 
                 outcome = await complete_in_thread(save_answer)
@@ -345,8 +356,8 @@ async def _execute_with_scope(
 
             outcome = await complete_in_thread(save_error)
     finally:
-        if turn is not None:
-            turn.close()
+        if attempt_state is not None:
+            attempt_state.close()
         if entered:
             # 先关闭模型流/跟踪并等在途线程，再核对数据库最终状态并匹配释放占用。
             await complete_in_thread(lambda: scope.__exit__(None, None, None))

@@ -591,7 +591,9 @@ class MessageRetryMySQLTest(unittest.IsolatedAsyncioTestCase):
         before = self.rows(), self.chat_row()
         tiny = replace(
             self.policy,
-            app_context_tokens=self.policy.app_context_tokens - self.policy.input_limit + 1,
+            app_context_tokens=self.policy.app_context_tokens
+            - self.policy.admission_input_budget_tokens
+            + 1,
         )
         with self.assertRaises(ContextTooLargeError), self.retry_scope(original, policy=tiny):
             self.fail("Must not yield")

@@ -28,7 +28,9 @@ class AgentTurnRecord(Base):
     messages: Mapped[list] = mapped_column(JSON)
 
 
-class MemoryState(Base):
+class MemoryConsolidationState(Base):
+    """Per-user background consolidation scheduling state, not graph memory state."""
+
     __tablename__ = "memory_consolidation_state"
     __table_args__: ClassVar = {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4"}
     user_id: Mapped[int] = mapped_column(
@@ -46,7 +48,9 @@ class MemoryState(Base):
     paused: Mapped[bool] = mapped_column(BOOLEAN, default=False)
 
 
-class MemoryJob(Base):
+class MemoryConsolidationJob(Base):
+    """One durable background consolidation job and its execution result."""
+
     __tablename__ = "memory_consolidation_jobs"
     __table_args__ = (
         Index("ix_memory_jobs_daily", "quota_date", "user_id"),
